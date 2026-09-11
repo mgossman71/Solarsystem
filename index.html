@@ -321,6 +321,80 @@
       color: #cfe1ff;
     }
 
+    /* ---------------- Explore (focus) panel ---------------- */
+    .focus-panel {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      z-index: 12;
+      background: rgba(12, 16, 28, 0.55);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 14px;
+      backdrop-filter: blur(16px) saturate(1.25);
+      -webkit-backdrop-filter: blur(16px) saturate(1.25);
+      color: rgba(255, 255, 255, 0.85);
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      opacity: 0.82;
+      transition: opacity 0.3s ease;
+      max-width: min(340px, calc(100vw - 40px));
+    }
+    .focus-panel:hover { opacity: 1; }
+    .focus-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .focus-label {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, 0.5);
+    }
+    .seg-group {
+      display: flex;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 20px;
+      padding: 2px;
+    }
+    .seg-btn {
+      background: transparent;
+      border: none;
+      color: rgba(255, 255, 255, 0.7);
+      padding: 5px 12px;
+      border-radius: 18px;
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      white-space: nowrap;
+    }
+    .seg-btn:hover { color: #fff; }
+    .seg-btn.active {
+      background: rgba(60, 130, 246, 0.3);
+      color: #cfe1ff;
+    }
+    .body-label {
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 11;
+      color: rgba(255, 255, 255, 0.55);
+      font-size: 11px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      pointer-events: none;
+      display: none;
+      text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
+      will-change: transform;
+    }
+
     /* Responsive */
     @media (max-width: 640px) {
       .sun-panel {
@@ -392,6 +466,32 @@
       <button class="sun-reset sun-manual" data-action="reset-sun">Reset Sun</button>
     </div>
   </div>
+  <div class="focus-panel" id="focus-panel">
+    <div class="focus-row">
+      <span class="focus-label">Explore</span>
+      <div class="seg-group">
+        <button class="seg-btn active" data-focus="earth">Earth</button>
+        <button class="seg-btn" data-focus="moon">Moon</button>
+        <button class="seg-btn" data-focus="system">System</button>
+      </div>
+    </div>
+    <div class="focus-row">
+      <span class="focus-label">Moon Orbit</span>
+      <div class="seg-group">
+        <button class="seg-btn" data-orbit="paused">Paused</button>
+        <button class="seg-btn active" data-orbit="visualized">Visualized</button>
+        <button class="seg-btn" data-orbit="realtime">Real Time</button>
+      </div>
+    </div>
+    <div class="focus-row">
+      <span class="focus-label">Distance</span>
+      <div class="seg-group">
+        <button class="seg-btn active" data-scale="explore">Exploration</button>
+        <button class="seg-btn" data-scale="real">Real Scale</button>
+      </div>
+    </div>
+  </div>
+  <div class="body-label" id="moon-label">Moon</div>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>
