@@ -8,13 +8,11 @@ import { SunLightingState } from './SunLighting';
 
 const earthVertexShader = /* glsl */ `
   varying vec2 vUv;
-  varying vec3 vNormal;
   varying vec3 vWorldNormal;
   varying vec3 vWorldPosition;
 
   void main() {
     vUv = uv;
-    vNormal = normalize(normalMatrix * normal);
     vWorldNormal = normalize(mat3(modelMatrix) * normal);
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
     vWorldPosition = worldPos.xyz;
@@ -122,6 +120,13 @@ const earthFragmentShader = /* glsl */ `
     color += sunsetColor * terminator * 0.10;
 
     gl_FragColor = vec4(color, 1.0);
+
+    // Tone-mapping + output color-space conversion. Custom ShaderMaterials do
+    // NOT get these injected automatically — without them the linear output is
+    // written verbatim into an sRGB-expecting framebuffer and the renderer's
+    // toneMapping/toneMappingExposure settings are silently ignored.
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
   }
 `;
 
@@ -156,6 +161,13 @@ const cloudFragmentShader = /* glsl */ `
     float sunDot = dot(normal, sunDir);
     float dayFactor = smoothstep(-0.03, 0.28, sunDot);
 
+    // Order must match the earth shader (highest threshold first) so the
+    // white-sphere validation branch is reachable.
+    if (uDebugMode > 2.5) {
+      // Pure white sphere validation: exact same Sun calc as the surface.
+      gl_FragColor = vec4(vec3(max(sunDot, 0.0)), 1.0);
+      return;
+    }
     if (uDebugMode > 1.5) {
       vec3 ramp = mix(vec3(0.08, 0.14, 0.55), vec3(1.0, 0.85, 0.35),
                       smoothstep(-0.12, 0.12, sunDot));
@@ -164,11 +176,6 @@ const cloudFragmentShader = /* glsl */ `
     }
     if (uDebugMode > 0.5) {
       gl_FragColor = vec4(normal * 0.5 + 0.5, 1.0);
-      return;
-    }
-    if (uDebugMode > 2.5) {
-      // Pure white sphere validation: exact same Sun calc as the surface.
-      gl_FragColor = vec4(vec3(max(sunDot, 0.0)), 1.0);
       return;
     }
 
@@ -208,6 +215,9 @@ const cloudFragmentShader = /* glsl */ `
     // faintly visible against city lights.
     float alpha = density * uOpacity * mix(0.35, 1.0, dayFactor);
     gl_FragColor = vec4(col, alpha);
+
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
   }
 `;
 
@@ -259,6 +269,9 @@ const atmosphereFragmentShader = /* glsl */ `
     // across the whole disk — it concentrates at the atmosphere edge.
     float intensity = fresnel * uIntensity;
     gl_FragColor = vec4(color * intensity, intensity);
+
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
   }
 `;
 
@@ -283,6 +296,9 @@ const starFragmentShader = /* glsl */ `
     if (dist > 0.5) discard;
     float alpha = smoothstep(0.5, 0.0, dist) * vBrightness;
     gl_FragColor = vec4(vec3(0.9, 0.92, 1.0), alpha);
+
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
   }
 `;
 
@@ -335,6 +351,19 @@ export class EarthScene {
   private _sunTmp = new THREE.Vector3();
   private sunPad: HTMLElement | null = null;
   private padHalf = 60;
+  /** Cached Sun-panel DOM refs — resolved once, so the per-frame update
+   *  never re-queries the document. */
+  private sunUI: {
+    azSlider: HTMLInputElement;
+    elSlider: HTMLInputElement;
+    azVal: HTMLElement;
+    elVal: HTMLElement;
+    knob: HTMLElement;
+  } | null = null;
+  /** Last values written to the Sun panel — skip DOM writes when unchanged. */
+  private lastAzShown: number | null = null;
+  private lastElShown: number | null = null;
+  private lastKnobTransform: string | null = null;
   private clock: THREE.Clock;
 
   private isInteracting = false;
@@ -344,11 +373,14 @@ export class EarthScene {
   private initialTarget = new THREE.Vector3(0, 0, 0);
 
   private animationId: number | null = null;
+  /** Handle for the in-flight reset-view transition (at most one at a time). */
+  private resetAnimId: number | null = null;
 
-  private state = { autoRotate: true, atmosphere: true, clouds: true, stars: true, autoSun: false, fullDaylight: false, softDaylight: false };
+  private state = { autoRotate: true, atmosphere: true, clouds: true, stars: true, autoSun: false, fullDaylight: false };
 
-  // Debug isolation (enabled via ?debug): 0 = normal rendering.
-  private debugMode = 0;
+  // Textures created in loadEarth — material.dispose() does NOT dispose them.
+  private textures: THREE.Texture[] = [];
+
   private showSunRay = false;
 
   constructor(container: HTMLElement) {
@@ -364,7 +396,17 @@ export class EarthScene {
     this.applyURLParams();
     this.loadEarth().catch((err) => {
       console.error('Failed to load Earth:', err);
-      document.body.innerHTML = '<p style="color:white;text-align:center;padding:2em">Failed to load Earth textures.</p>';
+      // Stop the render loop and release GPU resources before showing the
+      // overlay — otherwise animate() would keep running requestAnimationFrame
+      // forever against a detached canvas.
+      this.dispose();
+      const overlay = document.createElement('div');
+      overlay.style.cssText =
+        'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;' +
+        'justify-content:center;color:#fff;font:16px/1.4 system-ui,sans-serif;' +
+        'background:rgba(0,0,0,0.92)';
+      overlay.textContent = 'Failed to load Earth textures.';
+      document.body.appendChild(overlay);
     });
     this.setupUI();
     this.setupSunUI();
@@ -401,7 +443,11 @@ export class EarthScene {
     if (sunParam) {
       const [az, el] = sunParam.split(',').map((s) => parseFloat(s));
       if (Number.isFinite(az) && Number.isFinite(el)) {
-        this.sun.set(az, el);
+        // Clamp to valid ranges so ?sun=0,500 cannot yield a nonsense direction.
+        this.sun.set(
+          THREE.MathUtils.clamp(az, -180, 180),
+          THREE.MathUtils.clamp(el, -90, 90),
+        );
       }
     }
   }
@@ -443,6 +489,12 @@ export class EarthScene {
 
     controls.addEventListener('start', () => {
       this.isInteracting = true;
+      // User grabbed the camera: bail on any in-flight reset transition so it
+      // cannot fight the user's drag.
+      if (this.resetAnimId != null) {
+        cancelAnimationFrame(this.resetAnimId);
+        this.resetAnimId = null;
+      }
       if (this.interactionTimeout) clearTimeout(this.interactionTimeout);
     });
 
@@ -470,6 +522,7 @@ export class EarthScene {
     dayTexture.colorSpace = THREE.SRGBColorSpace;
     nightTexture.colorSpace = THREE.SRGBColorSpace;
     cloudTexture.colorSpace = THREE.SRGBColorSpace;
+    this.textures.push(dayTexture, nightTexture, cloudTexture);
 
     // Earth mesh with custom shader.
     // The surface independently renders a correct day/night hemisphere from
@@ -496,6 +549,7 @@ export class EarthScene {
     this.earthMesh = new THREE.Mesh(earthGeometry, earthMaterial);
     // Initial rotation to show North America / Atlantic toward camera
     this.earthMesh.rotation.y = -Math.PI * 0.25;
+    this.earthMesh.renderOrder = 0;
     this.scene.add(this.earthMesh);
 
     // Cloud layer (slightly larger) — a satellite cloud map (white with an
@@ -520,11 +574,11 @@ export class EarthScene {
     this.cloudMesh = new THREE.Mesh(cloudGeometry, cloudMaterial);
     this.cloudMesh.rotation.y = -Math.PI * 0.25;
     this.cloudMesh.visible = this.state.clouds;
+    this.cloudMesh.renderOrder = 1; // explicit transparent order: surface < clouds < atmosphere
     this.scene.add(this.cloudMesh);
 
     // ?mode=1|2|3 — apply the requested debug render mode once materials exist
     if (this.pendingDebugMode != null) {
-      this.debugMode = this.pendingDebugMode;
       earthMaterial.uniforms.uDebugMode.value = this.pendingDebugMode;
       cloudMaterial.uniforms.uDebugMode.value = this.pendingDebugMode;
       // White-sphere test = bare sphere: keep the cloud shell out of the way.
@@ -547,6 +601,7 @@ export class EarthScene {
     });
     this.atmosphereMesh = new THREE.Mesh(atmoGeometry, atmoMaterial);
     this.atmosphereMesh.visible = this.state.atmosphere;
+    this.atmosphereMesh.renderOrder = 2;
     this.scene.add(this.atmosphereMesh);
 
     // Star background
@@ -610,6 +665,7 @@ export class EarthScene {
     });
 
     const starField = new THREE.Points(starGeometry, starMaterial);
+    starField.renderOrder = 0; // explicit transparent order: stars < clouds < atmosphere
     this.scene.add(starField);
     return starField;
   }
@@ -652,30 +708,54 @@ export class EarthScene {
         case 'fullscreen': this.toggleFullscreen(); break;
       }
     });
+
+    // Initial sync pass: URL params (?clouds=0, ?atmosphere=0, ?rotate=0) may
+    // have changed the state before this ran — reflect it in the button
+    // "active" classes so the buttons can't read inverted from the scene.
+    this.syncUIButtons();
   }
 
+  /**
+   * Reflect `this.state` into the main UI toggle buttons. Every code path
+   * that flips clouds/atmosphere/auto-rotate (main UI, debug panel, URL
+   * params) must end here so the buttons never desync from the scene.
+   */
+  private syncUIButtons(): void {
+    const controlsEl = document.getElementById('ui-controls');
+    if (!controlsEl) return;
+    const sync = (action: string, on: boolean): void => {
+      const btn = controlsEl.querySelector(`[data-action="${action}"]`) as HTMLElement | null;
+      if (btn) btn.classList.toggle('active', on);
+    };
+    sync('auto-rotate', this.state.autoRotate);
+    sync('atmosphere', this.state.atmosphere);
+    sync('clouds', this.state.clouds);
+  }
+
+  /**
+   * Smoothly return the camera to the initial view. Driven by wall-clock
+   * time so the duration is frame-rate independent, and guarded by a single
+   * stored animation handle so rapid re-clicks can't stack competing
+   * transition chains. Cancels if the user grabs the camera mid-flight.
+   */
   private resetView(): void {
+    if (this.resetAnimId != null) cancelAnimationFrame(this.resetAnimId);
+    const durationMs = 600;
     const startPos = this.camera.position.clone();
     const endPos = this.initialCameraPosition.clone();
     const startTarget = this.controls.target.clone();
     const endTarget = this.initialTarget.clone();
-    let t = 0;
+    const t0 = performance.now();
 
-    const animate = () => {
-      t += 0.02;
-      if (t >= 1) {
-        this.camera.position.copy(endPos);
-        this.controls.target.copy(endTarget);
-        this.controls.update();
-        return;
-      }
+    const step = (now: number): void => {
+      const t = Math.min((now - t0) / durationMs, 1);
       const ease = t * t * (3 - 2 * t);
       this.camera.position.lerpVectors(startPos, endPos, ease);
       this.controls.target.lerpVectors(startTarget, endTarget, ease);
       this.controls.update();
-      requestAnimationFrame(animate);
+      this.resetAnimId = t < 1 ? requestAnimationFrame(step) : null;
     };
-    animate();
+    this.resetAnimId = requestAnimationFrame(step);
   }
 
   private toggleFullscreen(): void {
@@ -702,7 +782,8 @@ export class EarthScene {
   // independent in both modes.
   private updateSun(azimuth: number, elevation: number): void {
     this.sun.set(azimuth, elevation);
-    if (this.sunRay) this.sunRay.setDirection(this.sun.direction.clone());
+    // setDirection copies the vector into its geometry — no clone needed.
+    if (this.sunRay) this.sunRay.setDirection(this.sun.direction);
     this.updateSunUI();
   }
 
@@ -729,7 +810,7 @@ export class EarthScene {
       Math.asin(THREE.MathUtils.clamp(this._sunTmp.y, -1, 1)) * RAD2DEG;
     this.sun.azimuth =
       wrapAzimuth(Math.atan2(this._sunTmp.z, this._sunTmp.x) * RAD2DEG);
-    if (this.sunRay) this.sunRay.setDirection(this._sunTmp.clone());
+    if (this.sunRay) this.sunRay.setDirection(this.sun.direction);
     this.updateSunUI();
   }
 
@@ -753,7 +834,6 @@ export class EarthScene {
 
   /** Soft Daylight: subtle optional studio fill (see uSoftFill in shaders). */
   private setSoftDaylight(on: boolean): void {
-    this.state.softDaylight = on;
     // Deliberately low: it only lifts the day-side shadow band, never the
     // night side, so Full Daylight works perfectly well without it.
     const value = on ? 0.2 : 0.0;
@@ -811,9 +891,12 @@ export class EarthScene {
     const knob = document.getElementById('sun-knob') as HTMLElement | null;
     const azSlider = document.getElementById('sun-az') as HTMLInputElement | null;
     const elSlider = document.getElementById('sun-el') as HTMLInputElement | null;
-    if (!panel || !pad || !knob || !azSlider || !elSlider) return;
+    const azVal = document.getElementById('sun-az-val');
+    const elVal = document.getElementById('sun-el-val');
+    if (!panel || !pad || !knob || !azSlider || !elSlider || !azVal || !elVal) return;
 
     this.sunPad = pad;
+    this.sunUI = { azSlider, elSlider, azVal, elVal, knob };
     const measure = (): void => {
       const r = pad.getBoundingClientRect();
       if (r.width > 0) this.padHalf = Math.min(r.width, r.height) / 2;
@@ -848,8 +931,9 @@ export class EarthScene {
       this.updateSun((dx / half) * 180, (-dy / half) * 90);
     };
     const onDown = (e: PointerEvent): void => {
-      dragging = true;
+      // Guard first: never leave `dragging` stuck true in Full Daylight.
       if (this.state.fullDaylight) return;
+      dragging = true;
       this.setAutoSun(false);
       pad.setPointerCapture(e.pointerId);
       setFromPointer(e.clientX, e.clientY);
@@ -896,26 +980,38 @@ export class EarthScene {
       if (body) body.classList.toggle('hidden', collapsed);
       collapseBtn.textContent = collapsed ? '+' : '\u2212';
     });
-
-    this.updateSunUI();
   }
 
+  /**
+   * Per-frame Sun-panel readout. All element refs are cached in setupSunUI
+   * and every write is skipped when its value has not changed, so Auto Sun /
+   * Full Daylight modes do minimal DOM work each frame.
+   */
   private updateSunUI(): void {
-    const azSlider = document.getElementById('sun-az') as HTMLInputElement | null;
-    const elSlider = document.getElementById('sun-el') as HTMLInputElement | null;
-    const azVal = document.getElementById('sun-az-val');
-    const elVal = document.getElementById('sun-el-val');
-    const knob = document.getElementById('sun-knob') as HTMLElement | null;
-    if (azSlider) azSlider.value = String(Math.round(this.sun.azimuth));
-    if (elSlider) elSlider.value = String(Math.round(this.sun.elevation));
-    if (azVal) azVal.textContent = String(Math.round(this.sun.azimuth));
-    if (elVal) elVal.textContent = String(Math.round(this.sun.elevation));
-    if (this.sunPad && knob && this.padHalf > 0) {
+    const ui = this.sunUI;
+    if (!ui) return;
+    const az = Math.round(this.sun.azimuth);
+    const el = Math.round(this.sun.elevation);
+    if (this.lastAzShown !== az) {
+      ui.azSlider.value = String(az);
+      ui.azVal.textContent = String(az);
+      this.lastAzShown = az;
+    }
+    if (this.lastElShown !== el) {
+      ui.elSlider.value = String(el);
+      ui.elVal.textContent = String(el);
+      this.lastElShown = el;
+    }
+    if (this.padHalf > 0) {
       let dx = (this.sun.azimuth / 180) * this.padHalf;
       let dy = (-this.sun.elevation / 90) * this.padHalf;
       const len = Math.hypot(dx, dy);
       if (len > this.padHalf) { dx *= this.padHalf / len; dy *= this.padHalf / len; }
-      knob.style.transform = `translate(${dx}px, ${dy}px)`;
+      const transform = `translate(${dx}px, ${dy}px)`;
+      if (this.lastKnobTransform !== transform) {
+        ui.knob.style.transform = transform;
+        this.lastKnobTransform = transform;
+      }
     }
   }
 
@@ -926,8 +1022,9 @@ export class EarthScene {
   // visibility (surface / clouds / atmosphere / stars), a surface-normal view,
   // a "sun ramp" view that visualizes the exact dot(normal, sunDir) footprint,
   // and the Sun direction ray. There is no post-processing in this app (no
-  // composer — final output is raw shader color + renderer tone-mapping
-  // settings), so there is nothing extra to disable here.
+  // composer — final output is each shader's tone-mapping/color-space
+  // includes + the renderer's tone-mapping settings), so there is nothing
+  // extra to disable here.
   private setupDebugPanel(): void {
     const panel = document.createElement('div');
     panel.className = 'debug-panel';
@@ -962,6 +1059,7 @@ export class EarthScene {
           this.state.clouds ? 0.2 : 0.0;
       }
       cloudBtn.classList.toggle('active', this.state.clouds);
+      this.syncUIButtons(); // keep the main UI button in lockstep
     });
 
     const atmoBtn = makeToggle('Atmosphere', this.state.atmosphere);
@@ -969,6 +1067,7 @@ export class EarthScene {
       this.state.atmosphere = !this.state.atmosphere;
       if (this.atmosphereMesh) this.atmosphereMesh.visible = this.state.atmosphere;
       atmoBtn.classList.toggle('active', this.state.atmosphere);
+      this.syncUIButtons(); // keep the main UI button in lockstep
     });
 
     const starsBtn = makeToggle('Stars', this.state.stars);
@@ -987,7 +1086,6 @@ export class EarthScene {
     ];
     const modeBtns: HTMLButtonElement[] = [];
     const applyDebugMode = (mode: number): void => {
-      this.debugMode = mode;
       if (this.earthMaterial) this.earthMaterial.uniforms.uDebugMode.value = mode;
       if (this.cloudMaterial) this.cloudMaterial.uniforms.uDebugMode.value = mode;
       // The white-sphere test must render a BARE sphere — hide the cloud
@@ -1071,19 +1169,29 @@ export class EarthScene {
   // LIFECYCLE
   // ------------------------------------------------------------
   dispose(): void {
-    if (this.animationId) cancelAnimationFrame(this.animationId);
+    if (this.animationId != null) cancelAnimationFrame(this.animationId);
+    this.animationId = null;
+    if (this.resetAnimId != null) cancelAnimationFrame(this.resetAnimId);
+    this.resetAnimId = null;
+    if (this.interactionTimeout != null) {
+      clearTimeout(this.interactionTimeout);
+      this.interactionTimeout = null;
+    }
     window.removeEventListener('resize', this.onResize);
+    // Cover Mesh, Points and Line (the sun-ray ArrowHelper contains a Line
+    // whose geometry/material were previously skipped).
     this.scene.traverse((obj) => {
-      if (obj instanceof THREE.Mesh) {
-        obj.geometry.dispose();
-        if (Array.isArray(obj.material)) obj.material.forEach((m) => m.dispose());
-        else (obj.material as THREE.Material).dispose();
-      }
-      if (obj instanceof THREE.Points) {
-        obj.geometry.dispose();
-        (obj.material as THREE.Material).dispose();
+      if (obj instanceof THREE.Mesh || obj instanceof THREE.Points || obj instanceof THREE.Line) {
+        (obj as THREE.Mesh).geometry.dispose();
+        const mat = (obj as THREE.Mesh).material;
+        if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
+        else (mat as THREE.Material).dispose();
       }
     });
+    // material.dispose() does not dispose textures — free them explicitly
+    // (the cloud texture alone is several MB of GPU memory).
+    this.textures.forEach((t) => t.dispose());
+    this.controls.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }
