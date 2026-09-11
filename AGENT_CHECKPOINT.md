@@ -467,3 +467,49 @@ npm run dev
   - All lighting systems share one `sunDirection` Vector3 in world space; a single in-place update moves terminator, city lights, clouds, atmosphere and ocean specular together
   - **Never use a day texture with baked lighting** — double-shading creates "permanently dark" regions that no Sun position can fix; always validate a replacement texture numerically (uniform ocean luminance, per-region land luminance) before shipping it
   - DirectionalLight + AmbientLight in scene are no longer needed (all shaders are custom) but kept and updated for correctness
+
+---
+
+# MOON FEATURE — COMPLETED (branch `addMoon`)
+
+## What was built
+A realistic, interactive Moon in the Earth scene: exact 0.2727 size ratio
+(1737.4/6371 km), real lunar albedo map, correct tidal lock, true phases
+driven by the SAME shared Sun direction as Earth, and multi-body camera
+navigation (Earth / Moon / System focus, three orbit speeds, two distance
+scales, tap-to-select, Moon label in System view).
+
+## Files
+| File | Change |
+|------|--------|
+| `public/assets/moon/moon-day-2k.jpg` | NEW — real lunar albedo 2k (validated: maria dark, Tycho/Copernicus bright, near-side darker than far-side, correct aspect) |
+| `scripts/verify_moon_texture.py` | rewritten to validate the shipped asset — OVERALL PASS |
+| `src/earth/EarthScene.ts` | Moon shaders (diffuse-only + luminance-height relief, 4 debug modes); Moon constants; `createMoon`, `updateMoonTransform` (quaternion tidal lock, no drift); focus system (`setFocus`, `computeFocusPose`, `animateCameraTo` with live-target tracking + reduced-motion); `setMoonOrbit`, `setScaleMode`, `bindSelection` (tap-to-select), `updateMoonLabel`; camera far 1200; stars at r=200–350 (factor 600); URL params `?focus/orbit/scale`; debug panel Moon toggle; `resetView` → `setFocus('earth')` |
+| `index.html` | NEW Explore panel (Focus / Moon Orbit / Distance segmented buttons) + `#moon-label`; matching glassmorphism CSS |
+
+## Validation (all PASS)
+- `tsc --noEmit` clean; `npm run build` green (bundle 597 kB, pre-existing size warning only)
+- Orbit radius holds at 8 sampled angles; tidal lock (local +X → Earth) error < 1e-6 at all 8
+- Phase sweep over one orbit: illuminated fraction 0.013 → 0.987 (full cycle, shared sun direction)
+- Texture: `verify_moon_texture.py` OVERALL PASS
+- `pendingDebugMode` field exists (line 586) and is applied to the Moon material in `createMoon`
+
+## Browser checklist (human step)
+```bash
+npm run dev
+# 1) Explore → Moon        : cinematic fly-to, tidal face stays Earth-ward
+# 2) Explore → System      : both bodies + "Moon" label; drag to inspect
+# 3) Moon Orbit → Real Time: motion near-invisible (27.32 d); Visualized: 60 s/orbit; Paused: frozen
+# 4) Distance → Real Scale : Moon 60.3 Earth radii out (tiny); → Exploration returns it
+# 5) Tap Earth / tap Moon  : selects + reframes; drags never trigger selection
+# 6) ?debug&mode=3         : white-sphere test also applies to the Moon
+# 7) ?focus=moon&orbit=paused  : deterministic QA scene
+```
+
+## Invariants / design notes
+- One shared Sun Vector3 (`this.sun.direction`) feeds Earth, clouds, atmosphere, ocean specular AND the Moon — phases can never disagree
+- Tidal lock by quaternion alignment each frame (no accumulated rotation)
+- Moon relief without a bump asset: luminance-as-height normal perturbation (documented approximation)
+- Non-blocking texture load: grey placeholder on frame 1, real map swaps in
+- `animateCameraTo` re-resolves the END target via `focusCenter()` every frame → transitions tracking the orbiting Moon stay accurate; user grab cancels (resetAnimId pattern)
+- `prefers-reduced-motion` → instant camera cuts

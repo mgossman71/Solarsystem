@@ -274,6 +274,117 @@ const atmosphereFragmentShader = /* glsl */ `
   }
 `;
 
+// ---------------------------------------------------------------------------
+// MOON SHADERS
+//
+// The Moon shares the SAME Sun direction uniform as Earth (the one shared
+// `SunLightingState.direction` Vector3, referenced by uSunDirection), so
+// lunar phase geometry is exactly consistent with the Earth lighting.
+//
+// Deliberate absences (per design): no atmosphere, no sunset band, no soft
+// fill, negligible night ambient. The terminator is sharp — there is no air
+// to scatter light.
+//
+// Relief: no bump/height asset is shipped, but lunar albedo is a usable
+// height proxy — bright highlands and ray craters are topographically high,
+// dark maria sit low. The fragment shader samples that luminance field in a
+// tangent basis and perturbs the normal, so the shared directional Sun carves
+// real crater rims and mare floors from the same real lunar imagery.
+// ---------------------------------------------------------------------------
+
+const moonVertexShader = /* glsl */ `
+  varying vec2 vUv;
+  varying vec3 vWorldNormal;
+  varying vec3 vWorldPosition;
+
+  void main() {
+    vUv = uv;
+
+    // Uniform scale on the moon transform keeps this world normal valid.
+    vWorldNormal = normalize(mat3(modelMatrix) * normal);
+
+    vec4 worldPos = modelMatrix * vec4(position, 1.0);
+    vWorldPosition = worldPos.xyz;
+
+    gl_Position = projectionMatrix * viewMatrix * worldPos;
+  }
+`;
+
+const moonFragmentShader = /* glsl */ `
+  uniform sampler2D uTexture;
+  uniform vec3 uSunDirection;
+  uniform float uBumpScale;
+  uniform float uDebugMode; // 0: normal, 1: normals, 2: sun ramp, 3: white sphere
+
+  varying vec2 vUv;
+  varying vec3 vWorldNormal;
+  varying vec3 vWorldPosition;
+
+  // Albedo luminance as a height proxy (documented approximation derived
+  // from real lunar imagery; see section comment above).
+  float sampleHeight(vec2 uv) {
+    vec3 c = texture2D(uTexture, uv).rgb;
+    return dot(c, vec3(0.299, 0.587, 0.114));
+  }
+
+  void main() {
+    vec3 normal = normalize(vWorldNormal);
+    vec3 sunDir = normalize(uSunDirection);
+    float sunDot = dot(normal, sunDir);
+
+    // Debug modes (same palette as Earth for parity).
+    if (uDebugMode > 2.5) {
+      gl_FragColor = vec4(vec3(max(sunDot, 0.0)), 1.0);
+      #include <tonemapping_fragment>
+      #include <colorspace_fragment>
+      return;
+    }
+    if (uDebugMode > 1.5) {
+      vec3 ramp = mix(vec3(0.08, 0.14, 0.55), vec3(1.0, 0.85, 0.35), smoothstep(-0.12, 0.12, sunDot));
+      gl_FragColor = vec4(ramp, 1.0);
+      #include <tonemapping_fragment>
+      #include <colorspace_fragment>
+      return;
+    }
+    if (uDebugMode > 0.5) {
+      gl_FragColor = vec4(normal * 0.5 + 0.5, 1.0);
+      #include <tonemapping_fragment>
+      #include <colorspace_fragment>
+      return;
+    }
+
+    // Tangent-space relief from the luminance height proxy.
+    vec3 up = (abs(normal.y) > 0.99) ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+    vec3 tangent = normalize(cross(up, normal));
+    vec3 bitangent = cross(normal, tangent);
+    float e = 0.0025;
+    float hR = sampleHeight(vec2(fract(vUv.x + e), vUv.y));
+    float hL = sampleHeight(vec2(fract(vUv.x - e), vUv.y));
+    float hT = sampleHeight(vec2(vUv.x, min(vUv.y + e, 0.999)));
+    float hB = sampleHeight(vec2(vUv.x, max(vUv.y - e, 0.001)));
+    vec3 relNormal = normalize(normal
+      - tangent * (hR - hL) * uBumpScale
+      - bitangent * (hT - hB) * uBumpScale);
+    float relSunDot = dot(relNormal, sunDir);
+
+    // Dry regolith: diffuse-only. Sharp terminator: small smoothstep just to
+    // avoid aliasing — no warm sunset band, no atmospheric scatter.
+    vec3 albedo = texture2D(uTexture, vUv).rgb;
+    float day = smoothstep(-0.015, 0.06, relSunDot);
+    // Night side is genuinely dark; a whisper of earthshine keeps it out of
+    // pure black (1.5% albedo).
+    vec3 color = albedo * (max(relSunDot, 0.0) * day + 0.015 * (1.0 - day));
+
+    gl_FragColor = vec4(color, 1.0);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
+  }
+`;
+
+// ---------------------------------------------------------------------------
+// STAR SHADERS
+// ---------------------------------------------------------------------------
+
 const starVertexShader = /* glsl */ `
   attribute float aSize;
   attribute float aBrightness;
@@ -282,7 +393,7 @@ const starVertexShader = /* glsl */ `
   void main() {
     vBrightness = aBrightness;
     vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-    gl_PointSize = aSize * (300.0 / -mvPosition.z);
+    gl_PointSize = aSize * (600.0 / -mvPosition.z); // 600: stars sit at 200–350
     gl_Position = projectionMatrix * mvPosition;
   }
 `;
@@ -317,6 +428,29 @@ const INITIAL_SUN_ELEVATION = 18;  // degrees, -90..90
 
 function wrapAzimuth(deg: number): number {
   return ((deg + 180) % 360 + 360) % 360 - 180;
+}
+
+// ============================================================
+// MOON CONSTANTS (Earth radius = 1 scene unit)
+// ============================================================
+const MOON_RADIUS = 0.2727;                    // 1737.4 / 6371 km (exact size ratio)
+const MOON_ORBIT_EXPLORE = 10;                 // Exploration scale, center-to-center
+const MOON_ORBIT_REAL = 60.3;                  // true mean distance, in Earth radii
+const MOON_ORBIT_INCLINATION = (5.145 * Math.PI) / 180; // real mean orbital tilt
+const INITIAL_MOON_ANGLE = (-60 * Math.PI) / 180;       // starts right of Earth, not behind it
+const MOON_ORBIT_PERIOD_VISUAL = 60;           // seconds per orbit, "Visualized" mode
+const MOON_ORBIT_PERIOD_REALTIME = 27.32 * 24 * 3600;   // sidereal month, seconds
+
+type Focus = 'earth' | 'moon' | 'system';
+type MoonOrbitMode = 'paused' | 'visualized' | 'realtime';
+type ScaleMode = 'explore' | 'real';
+
+/** Camera framing for a focus target. */
+interface CameraPose {
+  position: THREE.Vector3;
+  target: THREE.Vector3;
+  minDistance: number;
+  maxDistance: number;
 }
 
 // ============================================================
@@ -379,6 +513,30 @@ export class EarthScene {
 
   private state = { autoRotate: true, atmosphere: true, clouds: true, stars: true, autoSun: false, fullDaylight: false };
 
+  // ------------------------------------------------------------
+  // MOON + NAVIGATION
+  // ------------------------------------------------------------
+  private moonMesh: THREE.Mesh | null = null;
+  private moonMaterial: THREE.ShaderMaterial | null = null;
+  private moonAngle = INITIAL_MOON_ANGLE;
+  /** Live Moon world position (Earth sits at the origin). */
+  readonly moonPosition = new THREE.Vector3();
+  private focus: Focus = 'earth';
+  /** Focus requested before assets finished loading — applied in loadEarth. */
+  private pendingFocus: Focus | null = null;
+  private moonOrbit: MoonOrbitMode = 'visualized';
+  private scaleMode: ScaleMode = 'explore';
+  private moonLabelEl: HTMLElement | null = null;
+
+  // Scratch (reused per frame — no allocations in the render loop).
+  private _v = new THREE.Vector3();
+  private _moonDir = new THREE.Vector3();
+  private _moonQuat = new THREE.Quaternion();
+  private readonly _plusX = new THREE.Vector3(1, 0, 0);
+  private readonly _origin = new THREE.Vector3(0, 0, 0);
+  private raycaster = new THREE.Raycaster();
+  private _tap = { downX: 0, downY: 0, downT: 0 };
+
   // Textures created in loadEarth — material.dispose() does NOT dispose them.
   private textures: THREE.Texture[] = [];
 
@@ -411,6 +569,8 @@ export class EarthScene {
     });
     this.setupUI();
     this.setupSunUI();
+    this.bindSelection();
+    this.moonLabelEl = document.getElementById('moon-label');
     if (this.debugEnabled) this.setupDebugPanel();
     this.animate();
   }
@@ -420,6 +580,8 @@ export class EarthScene {
   // ------------------------------------------------------------
   // Supported: ?debug  ?clouds=0|1  ?atmosphere=0|1  ?stars=0|1
   //            ?rotate=0|1  ?sun=az,el  ?mode=1|2|3  ?sunray=1
+  //            ?focus=earth|moon|system  ?orbit=paused|visualized|realtime
+  //            ?scale=explore|real
   private debugEnabled = false;
   private pendingDebugMode: number | null = null;
   private pendingSunRay = false;
@@ -440,6 +602,20 @@ export class EarthScene {
     if (params.get('sunray') === '1') this.pendingSunRay = true;
     if (params.get('frontlight') === '1') this.pendingFrontlight = true;
     if (params.get('softfill') === '1') this.pendingSoftfill = true;
+    const orbitParam = params.get('orbit');
+    if (orbitParam === 'paused' || orbitParam === 'visualized' || orbitParam === 'realtime') {
+      this.moonOrbit = orbitParam;
+    }
+    if (params.get('scale') === 'real') {
+      this.scaleMode = 'real';
+    }
+    const focusParam = params.get('focus');
+    if (focusParam === 'earth' || focusParam === 'moon' || focusParam === 'system') {
+      // 'moon'/'system' need the Moon to exist — applied at the end of
+      // loadEarth() (or by the first setFocus after it).
+      this.focus = focusParam;
+      if (focusParam !== 'earth') this.pendingFocus = focusParam;
+    }
     const sunParam = params.get('sun');
     if (sunParam) {
       const [az, el] = sunParam.split(',').map((s) => parseFloat(s));
@@ -473,7 +649,10 @@ export class EarthScene {
   }
 
   private createCamera(): THREE.PerspectiveCamera {
-    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 100);
+    // Far plane covers the Real-Scale Moon (center-to-center 60.3) with the
+    // camera pulled out to ~100 for the System view; the star field lives
+    // at 200–350, well inside the frustum.
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 1200);
     camera.position.copy(this.initialCameraPosition);
     return camera;
   }
@@ -632,6 +811,10 @@ export class EarthScene {
     this.atmosphereMesh.renderOrder = 2;
     this.scene.add(this.atmosphereMesh);
 
+    // Moon — exact 0.2727 size ratio to Earth, shared Sun, real lunar map
+    // (loads non-blocking; a neutral placeholder occupies the slot first).
+    this.createMoon(loader);
+
     // Star background
     this.starField = this.createStarField();
     this.starField.visible = this.state.stars;
@@ -652,6 +835,13 @@ export class EarthScene {
     if (this.pendingSoftfill) this.setSoftDaylight(true);
     if (this.pendingFrontlight) this.setFullDaylight(true);
 
+    // Focus requested before the Moon existed (URL param or fast UI click).
+    if (this.pendingFocus) {
+      const f = this.pendingFocus;
+      this.pendingFocus = null;
+      if (f !== 'earth') this.setFocus(f);
+    }
+
     // Fade out hint
     setTimeout(() => {
       const hint = document.getElementById('hint');
@@ -671,7 +861,9 @@ export class EarthScene {
     for (let i = 0; i < starCount; i++) {
       const theta = Math.random() * Math.PI * 2;
       const phi = Math.acos(2 * Math.random() - 1);
-      const radius = 40 + Math.random() * 30;
+      // 200–350: beyond the Real-Scale Moon orbit (60.3) so stars always sit
+      // behind both bodies, never between the camera and the Moon.
+      const radius = 200 + Math.random() * 150;
       positions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
       positions[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
       positions[i * 3 + 2] = radius * Math.cos(phi);
@@ -741,6 +933,27 @@ export class EarthScene {
     // have changed the state before this ran — reflect it in the button
     // "active" classes so the buttons can't read inverted from the scene.
     this.syncUIButtons();
+
+    // Explore panel: focus selector + Moon orbit mode + distance scale.
+    const focusPanel = document.getElementById('focus-panel');
+    if (focusPanel) {
+      focusPanel.addEventListener('click', (e) => {
+        const btn = (e.target as HTMLElement).closest(
+          'button[data-focus], button[data-orbit], button[data-scale]',
+        ) as HTMLElement | null;
+        if (!btn) return;
+        if (btn.dataset.focus) this.setFocus(btn.dataset.focus as Focus);
+        else if (btn.dataset.orbit) this.setMoonOrbit(btn.dataset.orbit as MoonOrbitMode);
+        else if (btn.dataset.scale) this.setScaleMode(btn.dataset.scale as ScaleMode);
+      });
+      // Reflect URL-param state (?focus, ?orbit, ?scale) in the segmented
+      // buttons so they never read inverted from the scene.
+      this.syncFocusUI();
+      focusPanel.querySelectorAll('[data-orbit]').forEach((el) =>
+        (el as HTMLElement).classList.toggle('active', (el as HTMLElement).dataset.orbit === this.moonOrbit));
+      focusPanel.querySelectorAll('[data-scale]').forEach((el) =>
+        (el as HTMLElement).classList.toggle('active', (el as HTMLElement).dataset.scale === this.scaleMode));
+    }
   }
 
   /**
@@ -761,29 +974,273 @@ export class EarthScene {
   }
 
   /**
-   * Smoothly return the camera to the initial view. Driven by wall-clock
-   * time so the duration is frame-rate independent, and guarded by a single
-   * stored animation handle so rapid re-clicks can't stack competing
-   * transition chains. Cancels if the user grabs the camera mid-flight.
+   * Smoothly return the camera to the initial view = Earth focus. Delegates
+   * to the shared focus transition (see setFocus) so Reset and the Explore
+   * selector can never fight each other. Cancels if the user grabs the
+   * camera mid-flight (handled in createControls via resetAnimId).
    */
   private resetView(): void {
-    if (this.resetAnimId != null) cancelAnimationFrame(this.resetAnimId);
-    const durationMs = 600;
-    const startPos = this.camera.position.clone();
-    const endPos = this.initialCameraPosition.clone();
-    const startTarget = this.controls.target.clone();
-    const endTarget = this.initialTarget.clone();
-    const t0 = performance.now();
+    this.setFocus('earth');
+  }
 
+  // ------------------------------------------------------------
+  // MOON — MESH, ORBIT, TIDAL LOCK
+  // ------------------------------------------------------------
+  private createMoon(loader: THREE.TextureLoader): void {
+    const geometry = new THREE.SphereGeometry(MOON_RADIUS, 96, 48);
+
+    // Grey placeholder so the Moon (and its exact 0.2727 scale) exists in
+    // the first frame; the real lunar map swaps in when it lands — the same
+    // non-blocking pattern the cloud layer uses.
+    const placeholder = new THREE.DataTexture(new Uint8Array([150, 150, 148, 255]), 1, 1);
+    placeholder.colorSpace = THREE.SRGBColorSpace;
+    placeholder.needsUpdate = true;
+    this.textures.push(placeholder);
+
+    const material = new THREE.ShaderMaterial({
+      vertexShader: moonVertexShader,
+      fragmentShader: moonFragmentShader,
+      uniforms: {
+        uTexture: { value: placeholder },
+        // The ONE shared Sun — the same Vector3 Earth, clouds and atmosphere
+        // reference, so the Moon phase always matches the Earth lighting.
+        uSunDirection: { value: this.sun.direction },
+        uBumpScale: { value: 1.6 },
+        uDebugMode: { value: 0.0 },
+      },
+    });
+    if (this.pendingDebugMode != null) material.uniforms.uDebugMode.value = this.pendingDebugMode;
+
+    this.moonMaterial = material;
+    this.moonMesh = new THREE.Mesh(geometry, material);
+    this.updateMoonTransform();
+    this.scene.add(this.moonMesh);
+
+    loader.loadAsync('/assets/moon/moon-day-2k.jpg')
+      .then((tex) => {
+        if (this.disposed) {
+          // Scene went away while loading — don't leak the texture.
+          tex.dispose();
+          return;
+        }
+        tex.colorSpace = THREE.SRGBColorSpace;
+        this.textures.push(tex);
+        if (this.moonMaterial) this.moonMaterial.uniforms.uTexture.value = tex;
+      })
+      .catch((err) => {
+        console.warn('Moon map failed to load; continuing with the placeholder:', err);
+      });
+  }
+
+  /**
+   * Position + tidal lock from the current angle/scale.
+   *
+   * Orbit: circle of radius R in a plane tilted MOON_ORBIT_INCLINATION
+   * (the real 5.145°) about the X axis.
+   *
+   * Tidal lock: the shipped equirectangular map has its prime meridian
+   * (near-side center, u=0.5) at local +X at identity orientation (verified
+   * against three.js SphereGeometry). Rotating +X onto the Earth-facing
+   * direction each frame therefore keeps the same face toward Earth —
+   * an exact lock with no accumulated spin that could ever drift.
+   */
+  private updateMoonTransform(): void {
+    const R = this.scaleMode === 'real' ? MOON_ORBIT_REAL : MOON_ORBIT_EXPLORE;
+    const a = this.moonAngle;
+    const s = Math.sin(a);
+    this.moonPosition.set(
+      R * Math.cos(a),
+      R * s * Math.sin(MOON_ORBIT_INCLINATION),
+      R * s * Math.cos(MOON_ORBIT_INCLINATION),
+    );
+    if (!this.moonMesh) return;
+    this.moonMesh.position.copy(this.moonPosition);
+    this._moonDir.copy(this.moonPosition).multiplyScalar(-1).normalize(); // toward Earth
+    this._moonQuat.setFromUnitVectors(this._plusX, this._moonDir);
+    this.moonMesh.quaternion.copy(this._moonQuat);
+  }
+
+  // ------------------------------------------------------------
+  // FOCUS / CAMERA NAVIGATION (Earth · Moon · System)
+  // ------------------------------------------------------------
+  private orbitRadius(): number {
+    return this.scaleMode === 'real' ? MOON_ORBIT_REAL : MOON_ORBIT_EXPLORE;
+  }
+
+  /** Resolve the live world-space center of the current focus target. */
+  private focusCenter(out: THREE.Vector3): THREE.Vector3 {
+    if (this.focus === 'moon') return out.copy(this.moonPosition);
+    if (this.focus === 'system') return out.copy(this.moonPosition).multiplyScalar(0.5);
+    return out.copy(this._origin);
+  }
+
+  private computeFocusPose(focus: Focus): CameraPose {
+    if (focus === 'earth') {
+      return {
+        position: this.initialCameraPosition.clone(),
+        target: this._origin.clone(),
+        minDistance: 1.3,
+        maxDistance: 8,
+      };
+    }
+    if (focus === 'moon') {
+      const target = this.moonPosition.clone();
+      const dir = this._v.copy(this.camera.position).sub(target);
+      if (dir.lengthSq() < 1e-8) dir.set(0, 0.25, 1);
+      dir.normalize();
+      return {
+        position: target.clone().addScaledVector(dir, 1.4),
+        target,
+        // Stay above the surface with room for the map to resolve.
+        minDistance: MOON_RADIUS * 1.6,
+        maxDistance: 6,
+      };
+    }
+    // system: pull back until BOTH bodies fit in the vertical FOV.
+    const target = this.moonPosition.clone().multiplyScalar(0.5);
+    const halfSpan = this.orbitRadius() * 0.5 + MOON_RADIUS;
+    const fitDist = halfSpan / Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2));
+    const dist = fitDist * 1.4 + MOON_RADIUS;
+    const dir = this._v.copy(this.camera.position).sub(target);
+    if (dir.lengthSq() < 1e-8) dir.set(0, 0.25, 1);
+    dir.normalize();
+    return {
+      position: target.clone().addScaledVector(dir, dist),
+      target,
+      minDistance: 2,
+      maxDistance: dist * 2.5,
+    };
+  }
+
+  /**
+   * Animate the camera to a pose. Wall-clock driven (frame-rate independent),
+   * single stored handle so rapid re-selection cannot stack competing
+   * chains; a user grab cancels it (createControls, resetAnimId). The END
+   * target is re-resolved every frame via focusCenter(), so while the Moon
+   * orbits mid-flight the transition keeps chasing its live position.
+   */
+  private animateCameraTo(pose: CameraPose, durationMs = 900): void {
+    if (this.resetAnimId != null) cancelAnimationFrame(this.resetAnimId);
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) durationMs = 0;
+    const startPos = this.camera.position.clone();
+    const startTarget = this.controls.target.clone();
+    this.controls.minDistance = pose.minDistance;
+    this.controls.maxDistance = pose.maxDistance;
+    if (durationMs <= 0) {
+      this.camera.position.copy(pose.position);
+      this.controls.target.copy(pose.target);
+      this.controls.update();
+      this.resetAnimId = null;
+      return;
+    }
+    const t0 = performance.now();
     const step = (now: number): void => {
       const t = Math.min((now - t0) / durationMs, 1);
       const ease = t * t * (3 - 2 * t);
-      this.camera.position.lerpVectors(startPos, endPos, ease);
-      this.controls.target.lerpVectors(startTarget, endTarget, ease);
+      this.camera.position.lerpVectors(startPos, pose.position, ease);
+      this.focusCenter(this._v); // live end-target (Moon moves while we fly)
+      this.controls.target.lerpVectors(startTarget, this._v, ease);
       this.controls.update();
       this.resetAnimId = t < 1 ? requestAnimationFrame(step) : null;
     };
     this.resetAnimId = requestAnimationFrame(step);
+  }
+
+  private syncFocusUI(): void {
+    document.querySelectorAll('#focus-panel [data-focus]').forEach((el) =>
+      (el as HTMLElement).classList.toggle('active', (el as HTMLElement).dataset.focus === this.focus));
+  }
+
+  /**
+   * Switch focus (Earth / Moon / System): reframe the camera with a
+   * cinematic transition and re-point OrbitControls at the new target.
+   * While focused on a moving body, animate() keeps the controls target
+   * glued to it every frame.
+   */
+  private setFocus(f: Focus): void {
+    this.focus = f;
+    this.syncFocusUI();
+    if (f !== 'earth' && !this.moonMesh) {
+      // Moon not built yet (textures still loading) — apply once ready.
+      this.pendingFocus = f;
+      return;
+    }
+    this.pendingFocus = null;
+    this.animateCameraTo(this.computeFocusPose(f));
+  }
+
+  private setMoonOrbit(mode: MoonOrbitMode): void {
+    this.moonOrbit = mode;
+    document.querySelectorAll('#focus-panel [data-orbit]').forEach((el) =>
+      (el as HTMLElement).classList.toggle('active', (el as HTMLElement).dataset.orbit === mode));
+  }
+
+  private setScaleMode(mode: ScaleMode): void {
+    if (mode === this.scaleMode) return;
+    this.scaleMode = mode;
+    this.updateMoonTransform();
+    document.querySelectorAll('#focus-panel [data-scale]').forEach((el) =>
+      (el as HTMLElement).classList.toggle('active', (el as HTMLElement).dataset.scale === mode));
+    // The system span changed — re-frame if we are looking at it.
+    if (this.focus !== 'earth' && this.moonMesh) {
+      this.animateCameraTo(this.computeFocusPose(this.focus));
+    }
+  }
+
+  // ------------------------------------------------------------
+  // TAP-TO-SELECT (Earth / Moon)
+  // ------------------------------------------------------------
+  /**
+   * A deliberate short, still tap selects the body under the pointer.
+   * Anything moving >6px or lasting >350ms is a drag/orbit, not a
+   * selection, so camera control and selection never fight.
+   */
+  private bindSelection(): void {
+    const dom = this.renderer.domElement;
+    dom.addEventListener('pointerdown', (e: PointerEvent) => {
+      this._tap.downX = e.clientX;
+      this._tap.downY = e.clientY;
+      this._tap.downT = performance.now();
+    });
+    dom.addEventListener('pointerup', (e: PointerEvent) => {
+      if (e.button !== 0) return;
+      if (performance.now() - this._tap.downT > 350) return;
+      if (Math.hypot(e.clientX - this._tap.downX, e.clientY - this._tap.downY) > 6) return;
+      const ndc = new THREE.Vector2(
+        (e.clientX / window.innerWidth) * 2 - 1,
+        -(e.clientY / window.innerHeight) * 2 + 1,
+      );
+      this.raycaster.setFromCamera(ndc, this.camera);
+      const meshes: THREE.Mesh[] = [];
+      if (this.moonMesh) meshes.push(this.moonMesh);
+      if (this.earthMesh) meshes.push(this.earthMesh);
+      const hits = this.raycaster.intersectObjects(meshes, false);
+      if (!hits.length) return;
+      const hit = hits[0].object;
+      if (hit === this.moonMesh) this.setFocus('moon');
+      else if (hit === this.earthMesh) this.setFocus('earth');
+    });
+  }
+
+  // ------------------------------------------------------------
+  // MOON LABEL (System view only)
+  // ------------------------------------------------------------
+  private updateMoonLabel(): void {
+    const el = this.moonLabelEl;
+    if (!el) return;
+    if (this.focus !== 'system' || !this.moonMesh) {
+      el.style.display = 'none';
+      return;
+    }
+    this._v.copy(this.moonPosition).project(this.camera);
+    if (this._v.z > 1) {
+      el.style.display = 'none';
+      return;
+    }
+    const x = (this._v.x * 0.5 + 0.5) * window.innerWidth;
+    const y = (-this._v.y * 0.5 + 0.5) * window.innerHeight;
+    el.style.display = 'block';
+    el.style.transform = `translate(-50%, -170%) translate(${x}px, ${y}px)`;
   }
 
   private toggleFullscreen(): void {
@@ -1079,6 +1536,14 @@ export class EarthScene {
       }
     });
 
+    const moonBtn = makeToggle('Moon', true);
+    moonBtn.addEventListener('click', () => {
+      if (this.moonMesh) {
+        this.moonMesh.visible = !this.moonMesh.visible;
+        moonBtn.classList.toggle('active', this.moonMesh.visible);
+      }
+    });
+
     const cloudBtn = makeToggle('Clouds', this.state.clouds);
     cloudBtn.addEventListener('click', () => {
       this.state.clouds = !this.state.clouds;
@@ -1116,6 +1581,7 @@ export class EarthScene {
     const modeBtns: HTMLButtonElement[] = [];
     const applyDebugMode = (mode: number): void => {
       if (this.earthMaterial) this.earthMaterial.uniforms.uDebugMode.value = mode;
+      if (this.moonMaterial) this.moonMaterial.uniforms.uDebugMode.value = mode;
       if (this.cloudMaterial) this.cloudMaterial.uniforms.uDebugMode.value = mode;
       // The white-sphere test must render a BARE sphere — hide the cloud
       // shell in mode 3 so it cannot occlude the surface under validation.
@@ -1189,6 +1655,21 @@ export class EarthScene {
       const nextAz = wrapAzimuth(this.sun.azimuth + dt * 10);
       this.updateSun(nextAz, this.sun.elevation);
     }
+
+    // Moon: advance the orbit (Paused / Visualized / Real Time), reposition,
+    // and keep the camera target glued to the focused moving body.
+    if (this.moonOrbit === 'visualized') {
+      this.moonAngle += (dt * Math.PI * 2) / MOON_ORBIT_PERIOD_VISUAL;
+    } else if (this.moonOrbit === 'realtime') {
+      this.moonAngle += (dt * Math.PI * 2) / MOON_ORBIT_PERIOD_REALTIME;
+    }
+    if (this.moonMesh) {
+      this.updateMoonTransform();
+      if (this.resetAnimId == null && this.focus !== 'earth') {
+        this.controls.target.copy(this.focusCenter(this._v));
+      }
+    }
+    this.updateMoonLabel();
 
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
