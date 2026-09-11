@@ -367,6 +367,8 @@ export class EarthScene {
 
   private isInteracting = false;
   private interactionTimeout: ReturnType<typeof setTimeout> | null = null;
+  /** True once dispose() has run — in-flight texture loads must not attach. */
+  private disposed = false;
 
   private initialCameraPosition = new THREE.Vector3(0, 0.5, 3.2);
   private initialTarget = new THREE.Vector3(0, 0, 0);
@@ -512,16 +514,24 @@ export class EarthScene {
     const loader = new THREE.TextureLoader();
     loader.setCrossOrigin('anonymous');
 
-    const [dayTexture, nightTexture, cloudTexture] = await Promise.all([
+    const [dayTexture, nightTexture] = await Promise.all([
       loader.loadAsync('/assets/earth/earth-day-albedo.jpg'),
       loader.loadAsync('/assets/earth/earth-night.jpg'),
-      loader.loadAsync('/assets/earth/earth-clouds.png'),
     ]);
 
     dayTexture.colorSpace = THREE.SRGBColorSpace;
     nightTexture.colorSpace = THREE.SRGBColorSpace;
-    cloudTexture.colorSpace = THREE.SRGBColorSpace;
-    this.textures.push(dayTexture, nightTexture, cloudTexture);
+    this.textures.push(dayTexture, nightTexture);
+
+    // Both cloud consumers sample only the alpha channel, so a 1x1 fully
+    // transparent placeholder is pixel-identical to "no clouds" (cloud shell:
+    // density 0 -> discard; surface shadow: smoothstep(0.2, 0.85, 0) -> no
+    // dimming). That lets the cloud map — the largest asset — load in the
+    // background: first paint no longer waits for it, and a missing asset
+    // degrades to a cloudless Earth instead of failing the whole load.
+    const noClouds = new THREE.DataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1);
+    noClouds.needsUpdate = true;
+    this.textures.push(noClouds);
 
     // Earth mesh with custom shader.
     // The surface independently renders a correct day/night hemisphere from
@@ -534,7 +544,7 @@ export class EarthScene {
       uniforms: {
         uDayTexture: { value: dayTexture },
         uNightTexture: { value: nightTexture },
-        uCloudTexture: { value: cloudTexture },
+        uCloudTexture: { value: noClouds },
         uSunDirection: { value: this.sun.direction },
         uOceanSpecular: { value: 0.45 },
         uNightIntensity: { value: 2.5 },
@@ -559,7 +569,7 @@ export class EarthScene {
       vertexShader: cloudVertexShader,
       fragmentShader: cloudFragmentShader,
       uniforms: {
-        uCloudTexture: { value: cloudTexture },
+        uCloudTexture: { value: noClouds },
         uSunDirection: { value: this.sun.direction },
         uOpacity: { value: 0.9 },
         uSoftFill: { value: 0 },
@@ -583,6 +593,25 @@ export class EarthScene {
       // White-sphere test = bare sphere: keep the cloud shell out of the way.
       if (this.pendingDebugMode === 3) this.cloudMesh.visible = false;
     }
+
+    // The cloud map arrives independently of first paint. Swap it into both
+    // materials when it does — they only ever read .a, so the placeholder and
+    // the real map are interchangeable from the shaders' point of view.
+    loader.loadAsync('/assets/earth/earth-clouds.png')
+      .then((cloudTexture) => {
+        if (this.disposed) {
+          // Scene went away while loading — don't leak the texture.
+          cloudTexture.dispose();
+          return;
+        }
+        cloudTexture.colorSpace = THREE.SRGBColorSpace;
+        this.textures.push(cloudTexture);
+        earthMaterial.uniforms.uCloudTexture.value = cloudTexture;
+        cloudMaterial.uniforms.uCloudTexture.value = cloudTexture;
+      })
+      .catch((err) => {
+        console.warn('Cloud map failed to load; continuing without clouds:', err);
+      });
 
     // Atmosphere glow (largest sphere)
     const atmoGeometry = new THREE.SphereGeometry(1.08, 64, 32);
@@ -1169,6 +1198,7 @@ export class EarthScene {
   // LIFECYCLE
   // ------------------------------------------------------------
   dispose(): void {
+    this.disposed = true;
     if (this.animationId != null) cancelAnimationFrame(this.animationId);
     this.animationId = null;
     if (this.resetAnimId != null) cancelAnimationFrame(this.resetAnimId);

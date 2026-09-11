@@ -130,3 +130,32 @@ anything the author typed.
 - `onMove` / `setFromPointer` still lack their own `fullDaylight` guard, but `dragging` can no
   longer be set in Full Daylight, so the path is unreachable. Only enabling Full Daylight
   *mid-drag* could still fight — narrow enough to leave.
+
+---
+
+## Update — 2026-09-11 (post-review)
+
+### 7. 5 MB cloud PNG — now fixed
+
+- **Recompressed** `earth-clouds.png`: 5,033,486 → 942,463 bytes (81% smaller). The file was
+  already a white+alpha palette and both shaders sample only `.a`, so the new 2048x1024
+  palette PNG carries the same information. Visible coverage is preserved (alpha p75 = 42,
+  p90 = 136 in both; fraction of pixels above the shader's 0.25 knee: 0.1941 vs 0.1950 for
+  the downsampled original). Pixels with alpha ≤ 25 are zeroed — mathematically invisible
+  in the current shader (`smoothstep(0.10, 0.85, d)` is 0 there in the cloud shell and in
+  the surface shadow), so the rendered output is unchanged apart from slightly softer
+  downscale edges. Original preserved in git history.
+- **Cloud load no longer blocks first paint**: `loadEarth()` now awaits only day/night;
+  both cloud consumers start on a 1x1 transparent placeholder (pixel-identical to
+  "no clouds", since only `.a` is read) and the map swaps in when it arrives. A cloud 404
+  now degrades to a cloudless Earth (console warning) instead of tearing the app down via
+  the `loadEarth().catch()` path. `disposed` flag prevents a post-dispose load from
+  leaking the texture.
+- Verified: `tsc --noEmit` clean, `npm run build` passes, dev server serves the page and
+  all three textures (cloud asset byte-identical to the source file).
+
+### 1 (follow-up). Shader constants re-tune — still deferred
+
+Left as-is: it is a visual sign-off call ("the render is plausible as it stands") and was
+deferred by decision. No automated browser was available for a before/after pass, so no
+numbers were changed.
