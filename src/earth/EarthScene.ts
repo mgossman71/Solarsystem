@@ -54,72 +54,72 @@ const earthFragmentShader = /* glsl */ `
     // shows one clean lit hemisphere, one dark hemisphere, a smooth terminator,
     // and NO fixed dark patch tied to geography — the Sun sweep moves the lit
     // hemisphere freely over the entire sphere.
+    //
+    // Debug isolation modes write straight into gl_FragColor instead of
+    // returning early: an early return would skip the tone-mapping and
+    // color-space includes at the end of main(), leaving the validation views
+    // in a different color space than the render they exist to validate.
     if (uDebugMode > 2.5) {
       gl_FragColor = vec4(vec3(max(dot(normal, sunDir), 0.0)), 1.0);
-      return;
-    }
-    if (uDebugMode > 1.5) {
+    } else if (uDebugMode > 1.5) {
       vec3 ramp = mix(vec3(0.08, 0.14, 0.55), vec3(1.0, 0.85, 0.35),
                       smoothstep(-0.12, 0.12, sunDot));
       gl_FragColor = vec4(ramp, 1.0);
-      return;
-    }
-    if (uDebugMode > 0.5) {
+    } else if (uDebugMode > 0.5) {
       gl_FragColor = vec4(normal * 0.5 + 0.5, 1.0);
-      return;
+    } else {
+      // ---- Day side ----
+      // uDayTexture is an unlit, evenly illuminated albedo map (no baked
+      // directional lighting, no composite night imagery) — safe to multiply by
+      // the shader's own directional Sun light without double shading.
+      vec3 raw = texture2D(uDayTexture, vUv).rgb;
+      float lum = dot(raw, vec3(0.299, 0.587, 0.114));
+      // Ocean mask (used only for the specular sheen): open ocean in this albedo
+      // map is strongly blue-dominant with low luminance; land is not.
+      float oceanMask = smoothstep(0.28, 0.04, lum)
+                      * smoothstep(0.8, 1.2, raw.b / max(raw.r, 0.001));
+      vec3 dayColor = raw;
+
+      vec3 nightColor = texture2D(uNightTexture, vUv).rgb;
+      nightColor = pow(nightColor, vec3(0.9)) * uNightIntensity;
+
+      // Gentle sub-solar falloff: brightest near the sub-solar point, easing to
+      // the terminator. Broad and smooth — never a hotspot or a spotlight.
+      float sunFacing = clamp(sunDot, 0.0, 1.0);
+      // Soft Daylight (optional studio fill): lifts ONLY the shadowed day-side
+      // band (1 - sunFacing), leaving the sub-solar point untouched — a subtle
+      // rim-lift that keeps the spherical shading, never a flat wash.
+      float dayShade = 0.85 + 0.15 * sunFacing + uSoftFill * (1.0 - sunFacing);
+      vec3 dayLit = dayColor * dayShade;
+
+      vec3 color = mix(nightColor, dayLit, dayFactor);
+
+      // Broad, soft ocean glint (wide lobe, low intensity — reads as a sheen)
+      vec3 halfDir = normalize(sunDir + viewDir);
+      float spec = pow(max(dot(normal, halfDir), 0.0), 36.0);
+      color += spec * oceanMask * dayFactor * uOceanSpecular * vec3(0.75, 0.87, 1.0);
+
+      // Subtle cloud shadows: sample the *same* cloud coverage that the cloud
+      // layer renders, at the cloud layer's current UV. Cloud drift is a pure
+      // Y-axis rotation, which maps exactly to a u-offset in equirectangular
+      // space, so the shadow tracks the clouds. Zeroed when clouds are hidden.
+      if (uCloudShadowStrength > 0.0) {
+        float cloudDensity = texture2D(uCloudTexture,
+          vec2(fract(vUv.x - uCloudUVOffset), vUv.y)).a;
+        color *= 1.0 - uCloudShadowStrength * smoothstep(0.2, 0.85, cloudDensity) * dayFactor;
+      }
+
+      // Gentle limb darkening (thin atmosphere at the edge)
+      float fresnel = 1.0 - max(dot(normal, viewDir), 0.0);
+      color *= 1.0 - fresnel * 0.12;
+
+      // Warm glow at the terminator (sunrise / sunset band)
+      float terminator = (1.0 - smoothstep(0.0, 0.30, abs(sunDot))) * dayFactor;
+      vec3 sunsetColor = vec3(0.82, 0.44, 0.16);
+      color += sunsetColor * terminator * 0.10;
+
+      gl_FragColor = vec4(color, 1.0);
     }
-
-    // ---- Day side ----
-    // uDayTexture is an unlit, evenly illuminated albedo map (no baked
-    // directional lighting, no composite night imagery) — safe to multiply by
-    // the shader's own directional Sun light without double shading.
-    vec3 raw = texture2D(uDayTexture, vUv).rgb;
-    float lum = dot(raw, vec3(0.299, 0.587, 0.114));
-    // Ocean mask (used only for the specular sheen): open ocean in this albedo
-    // map is strongly blue-dominant with low luminance; land is not.
-    float oceanMask = smoothstep(0.28, 0.04, lum)
-                    * smoothstep(0.8, 1.2, raw.b / max(raw.r, 0.001));
-    vec3 dayColor = raw;
-
-    vec3 nightColor = texture2D(uNightTexture, vUv).rgb;
-    nightColor = pow(nightColor, vec3(0.9)) * uNightIntensity;
-
-    // Gentle sub-solar falloff: brightest near the sub-solar point, easing to
-    // the terminator. Broad and smooth — never a hotspot or a spotlight.
-    float sunFacing = clamp(sunDot, 0.0, 1.0);
-    // Soft Daylight (optional studio fill): lifts ONLY the shadowed day-side
-    // band (1 - sunFacing), leaving the sub-solar point untouched — a subtle
-    // rim-lift that keeps the spherical shading, never a flat wash.
-    float dayShade = 0.85 + 0.15 * sunFacing + uSoftFill * (1.0 - sunFacing);
-    vec3 dayLit = dayColor * dayShade;
-
-    vec3 color = mix(nightColor, dayLit, dayFactor);
-
-    // Broad, soft ocean glint (wide lobe, low intensity — reads as a sheen)
-    vec3 halfDir = normalize(sunDir + viewDir);
-    float spec = pow(max(dot(normal, halfDir), 0.0), 36.0);
-    color += spec * oceanMask * dayFactor * uOceanSpecular * vec3(0.75, 0.87, 1.0);
-
-    // Subtle cloud shadows: sample the *same* cloud coverage that the cloud
-    // layer renders, at the cloud layer's current UV. Cloud drift is a pure
-    // Y-axis rotation, which maps exactly to a u-offset in equirectangular
-    // space, so the shadow tracks the clouds. Zeroed when clouds are hidden.
-    if (uCloudShadowStrength > 0.0) {
-      float cloudDensity = texture2D(uCloudTexture,
-        vec2(fract(vUv.x - uCloudUVOffset), vUv.y)).a;
-      color *= 1.0 - uCloudShadowStrength * smoothstep(0.2, 0.85, cloudDensity) * dayFactor;
-    }
-
-    // Gentle limb darkening (thin atmosphere at the edge)
-    float fresnel = 1.0 - max(dot(normal, viewDir), 0.0);
-    color *= 1.0 - fresnel * 0.12;
-
-    // Warm glow at the terminator (sunrise / sunset band)
-    float terminator = (1.0 - smoothstep(0.0, 0.30, abs(sunDot))) * dayFactor;
-    vec3 sunsetColor = vec3(0.82, 0.44, 0.16);
-    color += sunsetColor * terminator * 0.10;
-
-    gl_FragColor = vec4(color, 1.0);
 
     // Tone-mapping + output color-space conversion. Custom ShaderMaterials do
     // NOT get these injected automatically — without them the linear output is
@@ -163,58 +163,57 @@ const cloudFragmentShader = /* glsl */ `
 
     // Order must match the earth shader (highest threshold first) so the
     // white-sphere validation branch is reachable.
+    // Debug isolation modes write straight into gl_FragColor instead of
+    // returning early: an early return would skip the tone-mapping and
+    // color-space includes at the end of main(), leaving the validation views
+    // in a different color space than the render they exist to validate.
     if (uDebugMode > 2.5) {
       // Pure white sphere validation: exact same Sun calc as the surface.
       gl_FragColor = vec4(vec3(max(sunDot, 0.0)), 1.0);
-      return;
-    }
-    if (uDebugMode > 1.5) {
+    } else if (uDebugMode > 1.5) {
       vec3 ramp = mix(vec3(0.08, 0.14, 0.55), vec3(1.0, 0.85, 0.35),
                       smoothstep(-0.12, 0.12, sunDot));
       gl_FragColor = vec4(ramp, 1.0);
-      return;
-    }
-    if (uDebugMode > 0.5) {
+    } else if (uDebugMode > 0.5) {
       gl_FragColor = vec4(normal * 0.5 + 0.5, 1.0);
-      return;
+    } else {
+      // The satellite cloud map is white-with-alpha: the alpha channel IS the
+      // cloud density from the satellite image. Use it directly — no procedural
+      // noise modulation (that was producing uniform "cotton ball" coverage).
+      float d = texture2D(uCloudTexture, vUv).a;
+
+      // Density remap: suppress faint speckle below ~10% coverage, keep the
+      // wispy mid-range values (smoothstep gives a soft knee, not a hard
+      // threshold), and never clamp most of the disk to full white.
+      float density = smoothstep(0.10, 0.85, d);
+      if (density < 0.02) discard;
+
+      // Thin veils are slightly blue-grey; thick cumulus reads near-white.
+      // Off-white overall — clouds are not pure emissive white.
+      vec3 thin = vec3(0.78, 0.82, 0.88);
+      vec3 thick = vec3(0.96, 0.97, 1.0);
+      vec3 alb = mix(thin, thick, smoothstep(0.3, 0.95, d));
+
+      // Subtle sunlight response: brightness follows the same hemisphere
+      // illumination as the surface (same shared Sun direction).
+      float daylight = max(sunDot, 0.0);
+      // Same subtle Soft Daylight fill as the surface: lifts the day-side band
+      // away from the sub-solar point only, keeping cloud depth and shading.
+      vec3 dayCol = alb * (0.5 + 0.5 * daylight + uSoftFill * 0.5 * (1.0 - daylight));
+
+      // Night side: very dark, faint cool ambient only — no self-glow.
+      vec3 nightCol = alb * vec3(0.02, 0.025, 0.04);
+      vec3 col = mix(nightCol, dayCol, dayFactor);
+
+      // Warm terminator tint (sunrise/sunset on cloud tops), kept subtle.
+      float term = (1.0 - smoothstep(0.0, 0.35, abs(sunDot))) * dayFactor;
+      col += vec3(0.28, 0.13, 0.04) * term * 0.4;
+
+      // Thin clouds stay semi-transparent; night-side clouds dim but remain
+      // faintly visible against city lights.
+      float alpha = density * uOpacity * mix(0.35, 1.0, dayFactor);
+      gl_FragColor = vec4(col, alpha);
     }
-
-    // The satellite cloud map is white-with-alpha: the alpha channel IS the
-    // cloud density from the satellite image. Use it directly — no procedural
-    // noise modulation (that was producing uniform "cotton ball" coverage).
-    float d = texture2D(uCloudTexture, vUv).a;
-
-    // Density remap: suppress faint speckle below ~10% coverage, keep the
-    // wispy mid-range values (smoothstep gives a soft knee, not a hard
-    // threshold), and never clamp most of the disk to full white.
-    float density = smoothstep(0.10, 0.85, d);
-    if (density < 0.02) discard;
-
-    // Thin veils are slightly blue-grey; thick cumulus reads near-white.
-    // Off-white overall — clouds are not pure emissive white.
-    vec3 thin = vec3(0.78, 0.82, 0.88);
-    vec3 thick = vec3(0.96, 0.97, 1.0);
-    vec3 alb = mix(thin, thick, smoothstep(0.3, 0.95, d));
-
-    // Subtle sunlight response: brightness follows the same hemisphere
-    // illumination as the surface (same shared Sun direction).
-    float daylight = max(sunDot, 0.0);
-    // Same subtle Soft Daylight fill as the surface: lifts the day-side band
-    // away from the sub-solar point only, keeping cloud depth and shading.
-    vec3 dayCol = alb * (0.5 + 0.5 * daylight + uSoftFill * 0.5 * (1.0 - daylight));
-
-    // Night side: very dark, faint cool ambient only — no self-glow.
-    vec3 nightCol = alb * vec3(0.02, 0.025, 0.04);
-    vec3 col = mix(nightCol, dayCol, dayFactor);
-
-    // Warm terminator tint (sunrise/sunset on cloud tops), kept subtle.
-    float term = (1.0 - smoothstep(0.0, 0.35, abs(sunDot))) * dayFactor;
-    col += vec3(0.28, 0.13, 0.04) * term * 0.4;
-
-    // Thin clouds stay semi-transparent; night-side clouds dim but remain
-    // faintly visible against city lights.
-    float alpha = density * uOpacity * mix(0.35, 1.0, dayFactor);
-    gl_FragColor = vec4(col, alpha);
 
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
@@ -782,7 +781,8 @@ export class EarthScene {
   // independent in both modes.
   private updateSun(azimuth: number, elevation: number): void {
     this.sun.set(azimuth, elevation);
-    // setDirection copies the vector into its geometry — no clone needed.
+    // setDirection derives a quaternion from the vector and retains no
+    // reference to it — no clone needed.
     if (this.sunRay) this.sunRay.setDirection(this.sun.direction);
     this.updateSunUI();
   }
