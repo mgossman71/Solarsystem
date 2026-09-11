@@ -1,114 +1,132 @@
-# Code Review — Web-Earth
+# Code Review — Web-Earth (verification pass)
 
-**Scope:** `src/earth/EarthScene.ts` (1,091 lines), `src/earth/SunLighting.ts`, `src/main.ts`, `index.html`, build and Docker config.
+**Scope:** audit of commit `e38aad4` ("Address code review findings") against the original
+review, plus the two fixes that audit produced.
+**Branch:** `fix/code-review-findings`
 **Date:** 2026-09-11
 **Typecheck:** `npx tsc --noEmit` passes clean.
+**Runtime:** verified in a browser against `npm run dev` — no shader compile errors.
 
 ## Summary
 
-The shading math is sound. I traced the cloud-shadow UV derivation against three.js's `SphereGeometry` φ convention and its Y-rotation direction, and the `fract(vUv.x - uCloudUVOffset)` sign is correct. The single-shared-`Vector3` Sun design is the right call, and the comments explaining it are unusually good.
+The original review raised 8 numbered findings plus 10 smaller items. **16 of 18 were correctly
+fixed** by `e38aad4`. Two were deliberately deferred (both performance-only). The commit also
+introduced **one user-visible regression** and left **one internal inconsistency created by its
+own fix** — both are now fixed on top, in the working tree.
 
-Findings below are ordered worst-first. The two to fix first are **#1** (it silently changes how every tuned constant in the shaders should be read) and **#3** (users can actually hit it).
+The two fixes are small: `&deg;` moved back outside the Sun-readout spans, and the shader debug
+branches converted from early `return`s to an `if / else if / else` chain. The `EarthScene.ts`
+diff looks large (≈104 lines) but `git diff -w` shows the substantive change is 19 lines — the
+rest is the re-indent of the production block into the new `else`.
 
 ---
 
-## Bugs
+## Verified fixed
 
-### 1. `renderer.toneMapping` and `toneMappingExposure` do nothing
+| # | Finding | Evidence |
+|---|---|---|
+| 1 | `toneMapping` / `toneMappingExposure` dead | `#include <tonemapping_fragment>` / `<colorspace_fragment>` appended to all four fragment shaders. Confirmed these actually compile for a non-raw `ShaderMaterial`: three r186 emits `tonemapping_pars_fragment`, the `toneMapping()` function, `colorspace_pars_fragment` and `linearToOutputTexel` into `prefixFragment` in the **non-raw** branch (`three.module.js:6833` block, injections at `:6933-6941`). Confirmed again at runtime — no `THREE.WebGLProgram: Shader Error`. |
+| 2 | Cloud white-sphere branch unreachable | Reordered to `2.5 → 1.5 → 0.5`, matching the earth shader. `?mode=3` renders the white sphere. |
+| 3 | URL params desync the toggle buttons | New `syncUIButtons()`, called at the end of `setupUI()` (after `applyURLParams`) and from both debug-panel toggles. Verified: `?clouds=0&atmosphere=0&rotate=0` leaves all three buttons reading *off*, and clicking Clouds turns them *on* with `active` set — no longer inverted. |
+| 4 | `dispose()` leaks | Textures tracked in `this.textures` and disposed; `controls.dispose()` added; `traverse` now covers `THREE.Line` (the sun-ray `ArrowHelper`); `interactionTimeout` cleared. |
+| 5 | `resetView()` framerate-dependent / re-entrant | Now `performance.now()`-driven over a fixed 600 ms, single `resetAnimId` handle, cancelled by the OrbitControls `start` listener. |
+| 6 | Per-frame DOM work | Refs cached in `this.sunUI`; writes guarded by `lastAzShown` / `lastElShown` / `lastKnobTransform`. Both `setDirection(...clone())` allocations removed. |
+| 8 | `earth-topology.png` shipped unused | Deleted from `public/assets/earth/`. |
+| — | Error path destroyed the app | `dispose()` runs before an appended overlay `<div>`; no more `body.innerHTML` clobber. |
+| — | `dragging = true` before the guard | Assignment moved below the `fullDaylight` guard. |
+| — | Dead state / unused varying | `this.debugMode`, `state.softDaylight` and `vNormal` all removed. |
+| — | Duplicated Sun constants | Removed from `index.html`; the panel is populated from the TS constants on startup. |
+| — | `updateSunUI()` called twice | One call removed; the initialising call survives at `EarthScene.ts:973`. |
+| — | `?sun=az,el` not range-checked | Clamped via `THREE.MathUtils.clamp` to ±180 / ±90. |
+| — | Pinch-zoom blocked | `maximum-scale` / `user-scalable=no` dropped from the viewport meta. |
+| — | Implicit transparent draw order | Explicit `renderOrder` 0/0/1/2 on earth, stars, clouds, atmosphere. |
 
-`src/earth/EarthScene.ts:421-422`
+### One false alarm, recorded so it isn't re-raised
 
-Every material in this scene is a custom `ShaderMaterial`. In three.js, tone mapping and output color-space encoding are applied via the `<tonemapping_fragment>` / `<colorspace_fragment>` shader includes, which three only injects into its own built-in shaders — confirmed at `node_modules/three/build/three.module.js:497`. None of the four shaders here include them, so both lines are dead config.
+Swapping `setDirection(this._sunTmp.clone())` for `setDirection(this.sun.direction)` in
+`updateFullDaylightSun` **is safe**, despite `azimuth`/`elevation` being assigned directly rather
+than through `set()`. `this.sun.direction` is copied from `_sunTmp` four lines earlier
+(`EarthScene.ts:805`), so it is not stale.
 
-The asymmetry is what matters. Texture *input* decoding **is** active: three picks `SRGB8_ALPHA8` as the internal format when `texture.colorSpace === SRGBColorSpace` (`three.module.js:11252`), so the GPU decodes to linear at sample time. The pipeline therefore samples linear, does linear math, then writes linear straight to an sRGB-expecting framebuffer with no encode.
+The commit's comment justifying the change was wrong, though — it claimed "setDirection copies
+the vector into its geometry". `ArrowHelper.setDirection` derives a quaternion and retains no
+reference to the vector. Dropping the `clone()` is correct; the stated reason was not. Comment
+corrected.
 
-Fix — append to each fragment shader:
+---
 
-```glsl
-#include <tonemapping_fragment>
-#include <colorspace_fragment>
+## Problems found in the commit — now fixed
+
+### A. The degree symbol disappeared from the Sun readout (regression)
+
+De-duplicating the hardcoded `150` / `18` moved `&deg;` *inside* the span:
+
+```html
+<!-- as committed in e38aad4 -->
+<div>Azimuth&nbsp; <b><span id="sun-az-val">&deg;</span></b></div>
 ```
 
-This will visibly change the image. Tuned constants (`uNightIntensity: 2.5`, the `0.85 + 0.15 * sunFacing` day shade, the specular weights) will need re-tuning — they are currently compensating for the missing encode.
+`updateSunUI()` writes `ui.azVal.textContent = String(az)`, which replaces the span's entire
+contents — so the `°` was destroyed on the very first update and the panel read `150` / `18`
+with no unit, permanently. Before the commit the `&deg;` sat outside the span and survived.
 
-### 2. Cloud shader's white-sphere debug branch is unreachable
+**Fixed** in `index.html:368-369` — span left empty, `&deg;` back outside it. The intent of the
+original change (no hardcoded values) is preserved.
 
-`src/earth/EarthScene.ts:159-172`
+Verified: reads `150°` / `18°` on load, and still `0°` after clicking the Sunset preset.
 
-The earth shader orders its tests correctly (`2.5` → `1.5` → `0.5`, lines 59-69). The cloud shader orders them `1.5` → `0.5` → `2.5`, so `uDebugMode == 3` hits the sun-ramp branch and returns; the white-sphere branch at line 169 is dead.
+### B. Debug modes bypassed tone mapping (inconsistency created by fix #1)
 
-It is masked today only because `applyDebugMode` hides `cloudMesh` in mode 3 — meaning the validation harness has a latent hole exactly where you would least want one. Reorder to match the earth shader.
+In both the earth and cloud shaders, every `uDebugMode` branch ended in `return;` — placed
+*before* the two new includes at the end of `main()`. The production path was therefore
+ACES-tone-mapped and sRGB-encoded while the validation views stayed raw linear.
 
-### 3. URL params desync the toggle buttons
+This partly defeated finding #2's purpose: the white-sphere harness exists to be compared against
+the real render, and it was left in a different color space than the thing it validates.
 
-`src/earth/EarthScene.ts:389-392` vs `index.html:346-347`
+**Fixed** — both shaders restructured to a single exit (`if / else if / else`, no early returns),
+with the includes after the chain. Branch ordering stays identical in the two shaders
+(`2.5 → 1.5 → 0.5`), which was the point of #2.
 
-`?clouds=0`, `?atmosphere=0` and `?rotate=0` mutate `this.state` but never touch the DOM, and the buttons are hardcoded `class="ui-btn active"`. Load `?clouds=0` and the Clouds button reads as on while clouds are off; the first click then turns clouds *on* while removing `active`. Inverted from then on.
-
-`setupUI()` needs an initial sync pass from `this.state` to the buttons' `active` classes.
-
-The `?debug` panel has the same class of problem in reverse: toggling Clouds there (line 960) never updates the main button.
-
-### 4. `dispose()` leaks
-
-`src/earth/EarthScene.ts:1074-1087`
-
-- The three textures are never disposed — `material.dispose()` does not touch them, and these are large (5 MB cloud PNG).
-- `this.controls.dispose()` is missing, so OrbitControls' window and element listeners stay attached.
-- `traverse` only handles `Mesh` and `Points`; `sunRay` is an `ArrowHelper` containing a `Line`, whose geometry and material are skipped.
-- `interactionTimeout` is not cleared.
-
-### 5. `resetView()` is framerate-dependent and re-entrant
-
-`src/earth/EarthScene.ts:658-677`
-
-`t += 0.02` per frame means the transition takes 1 s at 50 fps and 0.42 s at 120 fps. Each click also starts an independent `requestAnimationFrame` chain with its own captured `startPos`, so double-clicking leaves two chains writing `camera.position` on alternating frames.
-
-Drive it off `clock`/elapsed time and guard with a single stored animation handle. It also does not bail when the user grabs the mouse mid-transition.
+Verified: `?mode=1`, `?mode=2` and `?mode=3` all render, with no shader compile errors.
 
 ---
 
-## Performance
+## Still open
 
-### 6. Per-frame DOM work in the render loop
+### 7. 5 MB cloud PNG — not addressed
 
-`src/earth/EarthScene.ts:903-920`
+`public/assets/earth/earth-clouds.png` is still 5,033,486 bytes and still blocks first paint via
+`Promise.all`. Only `.a` is ever sampled, yet full RGB is shipped. Deferred by decision, not an
+oversight.
 
-In Auto Sun and Full Daylight modes, `updateSunUI()` runs every frame: five `getElementById` calls, four `String(Math.round(...))` allocations, two input-value writes (each invalidating layout) and a `style.transform` write.
+### 1 (follow-up). Shader constants were never re-tuned
 
-Additionally, `this.sunRay.setDirection(this.sun.direction.clone())` allocates a `Vector3` per frame in both `updateSun` (line 705) and `updateFullDaylightSun` (line 729).
+The original review warned that fixing the tone-mapping gap would visibly change the image and
+that the tuned constants were compensating for the missing encode. ACES + exposure 1.1 + sRGB
+encode are now live, but `uNightIntensity: 2.5` (`EarthScene.ts:541`), the
+`0.85 + 0.15 * sunFacing` day shade (`EarthScene.ts:93`) and the specular weights are unchanged.
+The render is plausible as it stands, but it is not the tuning anyone signed off on. Deferred by
+decision.
 
-Cache the element references once in `setupSunUI`, skip the write when the rounded value has not changed, and reuse a scratch vector for `setDirection`.
+### Housekeeping
 
-### 7. 5 MB cloud PNG
-
-`public/assets/earth/earth-clouds.png`
-
-Dominates the payload and blocks first paint via `Promise.all`. Only `.a` is ever sampled, yet full RGB is shipped. A single-channel source, or WebP, would cut this by most of its size.
-
-### 8. `earth-topology.png` (378 KB) is shipped but never referenced
-
-Committed and present in `public/`, but absent from `src/` and `index.html`. `public/` is copied verbatim into `dist/`, so it is dead weight in every deploy.
-
----
-
-## Smaller things
-
-- **Error path destroys the app** — `EarthScene.ts:367`: `document.body.innerHTML = ...` wipes the canvas and UI, but `animate()` keeps running `requestAnimationFrame` against a detached canvas forever. Cancel the loop before replacing the DOM, and consider an overlay instead of clobbering `body`.
-- **`dragging = true` before the guard** — `EarthScene.ts:851`: `onDown` sets `dragging` then returns early if `fullDaylight`, leaving it true without pointer capture; `onMove`/`setFromPointer` have no `fullDaylight` check either. Unreachable today because `.sun-panel.full-daylight .sun-manual` sets `pointer-events: none` (`index.html:255`) — but that is CSS carrying a correctness invariant. Move the assignment below the guard.
-- **Dead state**: `this.debugMode` (line 351) and `this.state.softDaylight` (line 348) are only ever written, never read.
-- **Unused varying**: `earthVertexShader` computes and writes `vNormal` (line 17) which the fragment shader never declares.
-- **Duplicated constants**: `INITIAL_SUN_AZIMUTH`/`INITIAL_SUN_ELEVATION` (150/18) are hardcoded again in four places in `index.html` (lines 365, 366, 372, 376). They will drift.
-- **`updateSunUI()` called twice** at the end of `setupSunUI` — lines 889 and 900.
-- **`?sun=az,el` is not range-checked** — only `Number.isFinite`, so `?sun=0,500` yields a nonsense direction. Clamp to ±180/±90.
-- **`maximum-scale=1.0, user-scalable=no`** (`index.html:5`) blocks pinch-zoom. The sun pad is also a `<div>` with pointer handlers only — no keyboard path, though the sliders do cover it.
-- **Implicit transparent draw order**: `cloudMesh` and `atmosphereMesh` are both centered at the origin, so three's `reversePainterSortStable` (`three.module.js:8078`) ties on `z` and falls through to object id — i.e. insertion order. Deterministic, but accidentally so. Setting explicit `renderOrder` would make the intent survive a reordering of `loadEarth`.
+The `e38aad4` commit message body is corrupted: a repeated `- Clamp ?sun=az,el to` fragment, a
+`-----rd-----rd` run, and a stray `EOF` line. It has already merged to `main` via PR #1, so it is
+now permanent short of a history rewrite — recorded here rather than as an action item. Worth a
+glance at whatever produced it, since the garbling looks like a truncated heredoc rather than
+anything the author typed.
 
 ---
 
 ## Not an issue
 
 - No security concerns found.
-- The absolute `/assets/...` paths are correct for the nginx-at-root deployment in the `Dockerfile` — they would only break under a sub-path.
-- The cloud-shadow UV sign convention is correct (verified against `SphereGeometry`'s φ mapping and Y-rotation direction).
+- The absolute `/assets/...` paths are correct for the nginx-at-root deployment in the
+  `Dockerfile` — they would only break under a sub-path.
+- The cloud-shadow UV sign convention is correct (verified against `SphereGeometry`'s φ mapping
+  and Y-rotation direction).
 - Cloud shell radius (1.01) clears the earth mesh's facet dip at its tessellation — no z-fighting.
+- `onMove` / `setFromPointer` still lack their own `fullDaylight` guard, but `dragging` can no
+  longer be set in Full Daylight, so the path is unreachable. Only enabling Full Daylight
+  *mid-drag* could still fight — narrow enough to leave.
