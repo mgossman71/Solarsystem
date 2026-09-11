@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Earth</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    }
+    #app {
+      width: 100%;
+      height: 100%;
+      position: relative;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    .ui-controls {
+      position: absolute;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      z-index: 10;
+      opacity: 0.6;
+      transition: opacity 0.3s ease;
+    }
+    .ui-controls:hover { opacity: 1; }
+    .ui-btn {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: rgba(255, 255, 255, 0.85);
+      padding: 8px 14px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: 0.3px;
+      cursor: pointer;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      transition: all 0.2s ease;
+      user-select: none;
+    }
+    .ui-btn:hover {
+      background: rgba(255, 255, 255, 0.14);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+    .ui-btn.active {
+      background: rgba(60, 130, 246, 0.2);
+      border-color: rgba(60, 130, 246, 0.4);
+      color: rgba(140, 190, 255, 0.95);
+    }
+    .hint-text {
+      position: absolute;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(255, 255, 255, 0.35);
+      font-size: 11px;
+      letter-spacing: 0.5px;
+      z-index: 10;
+      pointer-events: none;
+      transition: opacity 2s ease;
+    }
+
+    /* ---------------- Sun Lighting panel ---------------- */
+    .sun-panel {
+      position: absolute;
+      top: 50%;
+      right: 20px;
+      transform: translateY(-50%);
+      width: 232px;
+      z-index: 12;
+      background: rgba(12, 16, 28, 0.55);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 16px;
+      backdrop-filter: blur(16px) saturate(1.25);
+      -webkit-backdrop-filter: blur(16px) saturate(1.25);
+      box-shadow: 0 14px 44px rgba(0, 0, 0, 0.45);
+      color: rgba(255, 255, 255, 0.85);
+      padding: 14px;
+      opacity: 0.82;
+      transition: opacity 0.3s ease;
+    }
+    .sun-panel:hover { opacity: 1; }
+    .sun-panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .sun-panel-title {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, 0.55);
+    }
+    .sun-head-actions { display: flex; gap: 6px; align-items: center; }
+    .sun-auto-btn {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: rgba(255, 255, 255, 0.7);
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .sun-auto-btn:hover { background: rgba(255, 255, 255, 0.13); }
+    .sun-auto-btn.active {
+      background: rgba(255, 190, 90, 0.2);
+      border-color: rgba(255, 190, 90, 0.5);
+      color: rgba(255, 208, 138, 0.98);
+    }
+    .icon-btn {
+      width: 26px;
+      height: 26px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: rgba(255, 255, 255, 0.7);
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s ease;
+    }
+    .icon-btn:hover { background: rgba(255, 255, 255, 0.14); }
+    .sun-body.hidden { display: none; }
+
+    /* Pad (draggable Sun dial) */
+    .sun-pad-wrap { display: flex; gap: 12px; align-items: center; margin-bottom: 14px; }
+    .sun-pad {
+      position: relative;
+      width: 120px;
+      height: 120px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 50% 38%, rgba(70, 110, 190, 0.28), rgba(8, 12, 22, 0.72) 72%);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      cursor: grab;
+      touch-action: none;
+      flex: 0 0 auto;
+      box-shadow: inset 0 0 24px rgba(0, 0, 0, 0.4);
+    }
+    .sun-pad:active { cursor: grabbing; }
+    .sun-pad::before, .sun-pad::after {
+      content: "";
+      position: absolute;
+      background: rgba(255, 255, 255, 0.08);
+      pointer-events: none;
+    }
+    .sun-pad::before { left: 50%; top: 16px; bottom: 16px; width: 1px; transform: translateX(-0.5px); }
+    .sun-pad::after { top: 50%; left: 16px; right: 16px; height: 1px; transform: translateY(-0.5px); }
+    .sun-pad-ring {
+      position: absolute;
+      inset: 15px;
+      border-radius: 50%;
+      border: 1px dashed rgba(255, 255, 255, 0.12);
+      pointer-events: none;
+    }
+    .sun-pad-knob {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 22px;
+      height: 22px;
+      margin: -11px 0 0 -11px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 30%, #fff3d6, #ffb63e 55%, #ff8a1e);
+      box-shadow: 0 0 14px rgba(255, 180, 60, 0.8), 0 0 4px rgba(255, 224, 158, 0.9);
+      pointer-events: none;
+      will-change: transform;
+    }
+    .sun-readout {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.5);
+      min-width: 62px;
+    }
+    .sun-readout b { color: rgba(255, 255, 255, 0.92); font-weight: 600; }
+
+    /* Sliders */
+    .sun-sliders { display: flex; flex-direction: column; gap: 11px; margin-bottom: 14px; }
+    .sun-slider-row { display: flex; align-items: center; gap: 10px; }
+    .sun-slider-row label { font-size: 11px; color: rgba(255, 255, 255, 0.5); width: 56px; flex: 0 0 auto; }
+    .sun-range {
+      -webkit-appearance: none;
+      appearance: none;
+      flex: 1;
+      height: 4px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.14);
+      outline: none;
+      cursor: pointer;
+    }
+    .sun-range::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid rgba(255, 180, 60, 0.85);
+      box-shadow: 0 0 6px rgba(255, 180, 60, 0.5);
+      cursor: pointer;
+    }
+    .sun-range::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid rgba(255, 180, 60, 0.85);
+      cursor: pointer;
+    }
+
+    /* Presets */
+    .sun-presets { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 12px; }
+    .sun-preset {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: rgba(255, 255, 255, 0.75);
+      padding: 7px 0;
+      border-radius: 8px;
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+      text-align: center;
+      transition: all 0.2s ease;
+    }
+    .sun-preset:hover { background: rgba(255, 255, 255, 0.14); color: #fff; }
+    .sun-preset-full { grid-column: 1 / -1; }
+    .sun-preset.active {
+      background: rgba(60, 130, 246, 0.22);
+      border-color: rgba(60, 130, 246, 0.55);
+      color: rgba(175, 208, 255, 0.98);
+      box-shadow: 0 0 10px rgba(60, 130, 246, 0.25);
+    }
+    /* Full Daylight active: the manual Sun controls stay visible but are
+       clearly overridden — dimmed and non-interactive. */
+    .sun-panel.full-daylight .sun-manual { opacity: 0.4; pointer-events: none; }
+    .sun-softfill {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.6);
+      margin-bottom: 12px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .sun-softfill input { accent-color: #ffb63e; cursor: pointer; }
+    .sun-reset {
+      width: 100%;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: rgba(255, 255, 255, 0.82);
+      padding: 8px 0;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .sun-reset:hover { background: rgba(255, 255, 255, 0.15); }
+
+    /* ---------------- Debug panel (?debug) ---------------- */
+    .debug-panel {
+      position: absolute;
+      top: 16px;
+      left: 16px;
+      z-index: 20;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      max-width: 280px;
+      background: rgba(10, 14, 24, 0.62);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 10px;
+      padding: 10px;
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+    }
+    .debug-title {
+      width: 100%;
+      font-size: 10px;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, 0.5);
+      margin-bottom: 2px;
+    }
+    .debug-btn {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: rgba(255, 255, 255, 0.85);
+      padding: 4px 10px;
+      border-radius: 14px;
+      font-size: 11px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .debug-btn:hover { background: rgba(255, 255, 255, 0.14); }
+    .debug-btn.active {
+      background: rgba(60, 130, 246, 0.3);
+      border-color: rgba(60, 130, 246, 0.6);
+      color: #cfe1ff;
+    }
+
+    /* Responsive */
+    @media (max-width: 640px) {
+      .sun-panel {
+        top: auto;
+        bottom: 74px;
+        right: 12px;
+        left: 12px;
+        transform: none;
+        width: auto;
+        max-height: 46vh;
+        overflow-y: auto;
+      }
+      .sun-pad-wrap { justify-content: center; }
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div class="hint-text" id="hint">Drag to rotate &bull; Scroll to zoom</div>
+  <div class="ui-controls" id="ui-controls">
+    <button class="ui-btn active" data-action="reset">Reset</button>
+    <button class="ui-btn active" data-action="auto-rotate">Auto Rotate</button>
+    <button class="ui-btn active" data-action="atmosphere">Atmosphere</button>
+    <button class="ui-btn active" data-action="clouds">Clouds</button>
+    <button class="ui-btn" data-action="fullscreen">Fullscreen</button>
+  </div>
+  <div class="sun-panel" id="sun-panel">
+    <div class="sun-panel-header">
+      <span class="sun-panel-title">Sun Lighting</span>
+      <div class="sun-head-actions">
+        <button class="sun-auto-btn sun-manual" data-action="auto-sun" title="Auto-orbit the Sun">Auto</button>
+        <button class="icon-btn" data-action="collapse-sun" title="Collapse">&#8722;</button>
+      </div>
+    </div>
+    <div class="sun-body">
+      <div class="sun-pad-wrap sun-manual">
+        <div class="sun-pad" id="sun-pad" title="Drag: left/right = azimuth, up/down = elevation">
+          <div class="sun-pad-ring"></div>
+          <div class="sun-pad-knob" id="sun-knob"></div>
+        </div>
+        <div class="sun-readout">
+          <div>Azimuth&nbsp; <b><span id="sun-az-val">150</span>&deg;</b></div>
+          <div>Elev.&nbsp;&nbsp;&nbsp;&nbsp; <b><span id="sun-el-val">18</span>&deg;</b></div>
+        </div>
+      </div>
+      <div class="sun-sliders sun-manual">
+        <div class="sun-slider-row">
+          <label>Azimuth</label>
+          <input type="range" id="sun-az" class="sun-range" min="-180" max="180" step="1" value="150">
+        </div>
+        <div class="sun-slider-row">
+          <label>Elevation</label>
+          <input type="range" id="sun-el" class="sun-range" min="-90" max="90" step="1" value="18">
+        </div>
+      </div>
+      <div class="sun-presets">
+        <button class="sun-preset sun-preset-full" data-preset="full-daylight" title="Sun follows the camera — the visible hemisphere stays fully daylight">Full Daylight</button>
+        <button class="sun-preset sun-manual" data-preset="day">Day</button>
+        <button class="sun-preset sun-manual" data-preset="sunset">Sunset</button>
+        <button class="sun-preset sun-manual" data-preset="night">Night</button>
+        <button class="sun-preset sun-manual" data-preset="backlit">Backlit</button>
+      </div>
+      <label class="sun-softfill" title="Optional subtle studio fill — slightly lifts deep limb shadows while keeping the spherical look">
+        <input type="checkbox" id="sun-softfill"> Soft Daylight fill
+      </label>
+      <button class="sun-reset sun-manual" data-action="reset-sun">Reset Sun</button>
+    </div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
