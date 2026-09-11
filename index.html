@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Earth</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -362,18 +362,21 @@
           <div class="sun-pad-knob" id="sun-knob"></div>
         </div>
         <div class="sun-readout">
-          <div>Azimuth&nbsp; <b><span id="sun-az-val">150</span>&deg;</b></div>
-          <div>Elev.&nbsp;&nbsp;&nbsp;&nbsp; <b><span id="sun-el-val">18</span>&deg;</b></div>
+          <!-- initial values are populated from EarthScene on startup
+               (INITIAL_SUN_AZIMUTH / INITIAL_SUN_ELEVATION) — do not hardcode
+               them here, they would drift from the TS constants -->
+          <div>Azimuth&nbsp; <b><span id="sun-az-val">&deg;</span></b></div>
+          <div>Elev.&nbsp;&nbsp;&nbsp;&nbsp; <b><span id="sun-el-val">&deg;</span></b></div>
         </div>
       </div>
       <div class="sun-sliders sun-manual">
         <div class="sun-slider-row">
           <label>Azimuth</label>
-          <input type="range" id="sun-az" class="sun-range" min="-180" max="180" step="1" value="150">
+          <input type="range" id="sun-az" class="sun-range" min="-180" max="180" step="1">
         </div>
         <div class="sun-slider-row">
           <label>Elevation</label>
-          <input type="range" id="sun-el" class="sun-range" min="-90" max="90" step="1" value="18">
+          <input type="range" id="sun-el" class="sun-range" min="-90" max="90" step="1">
         </div>
       </div>
       <div class="sun-presets">
