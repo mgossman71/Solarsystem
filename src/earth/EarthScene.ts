@@ -7,471 +7,61 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import {
   SunLightingState,
   sunDirectionToward,
-} from './SunLighting';
+} from '../lighting/SunLighting';
+import {
+  QUALITY_PROFILES,
+  QualityProfile,
+  QualitySetting,
+  QualityTier,
+  TEXTURE_PATHS,
+  detectAutoTier,
+  nextTierDown,
+  resolveProfile,
+} from '../core/Quality';
+import { CameraPose, Focus, MoonOrbitMode, ScaleMode } from '../core/types';
+import {
+  INITIAL_MOON_ANGLE,
+  INITIAL_SUN_AZIMUTH,
+  INITIAL_SUN_ELEVATION,
+  MOON_ORBIT_EXPLORE,
+  MOON_ORBIT_INCLINATION,
+  MOON_ORBIT_PERIOD_REALTIME,
+  MOON_ORBIT_PERIOD_VISUAL,
+  MOON_ORBIT_REAL,
+  MOON_RADIUS,
+  STAR_FIELD_RADIUS_MIN,
+  STAR_FIELD_RADIUS_SPAN,
+  SUN_DISTANCE,
+  SUN_RADIUS,
+  wrapAzimuth,
+} from '../config/sceneScale';
+import {
+  CAMERA_FAR,
+  CAMERA_FOV,
+  CAMERA_NEAR,
+  CONTROLS,
+  INITIAL_CAMERA_POSITION,
+  INITIAL_TARGET,
+  INTERACTION_SETTLE_MS,
+  ORIENTATION_REFRAME_MS,
+} from '../config/camera';
+import { prefersReducedMotion } from '../config/mobile';
+import { sunVertexShader, sunFragmentShader } from '../sun/shaders/sun';
+import { createStarField } from './StarField';
+import { earthVertexShader, earthFragmentShader } from '../earth/shaders/earth';
+import { cloudVertexShader, cloudFragmentShader } from '../earth/shaders/cloud';
+import { atmosphereVertexShader, atmosphereFragmentShader } from '../earth/shaders/atmosphere';
+import { starVertexShader, starFragmentShader } from '../earth/shaders/starfield';
+import { moonVertexShader, moonFragmentShader } from '../moon/shaders/moon';
 
 // ============================================================
-// SHADERS
+// SHARED TYPES & SCENE SCALE (extracted into focused modules)
 // ============================================================
-
-const earthVertexShader = /* glsl */ `
-  varying vec2 vUv;
-  varying vec3 vWorldNormal;
-  varying vec3 vWorldPosition;
-
-  void main() {
-    vUv = uv;
-    vWorldNormal = normalize(mat3(modelMatrix) * normal);
-    vec4 worldPos = modelMatrix * vec4(position, 1.0);
-    vec4 mvPosition = viewMatrix * worldPos;
-    vWorldPosition = worldPos.xyz;
-    gl_Position = projectionMatrix * mvPosition;
-  }
-`;
-
-const earthFragmentShader = /* glsl */ `
-  uniform sampler2D uDayTexture;
-  uniform sampler2D uNightTexture;
-  uniform sampler2D uCloudTexture;
-  uniform vec3 uSunDirection;
-  uniform float uOceanSpecular;
-  uniform float uNightIntensity;
-  uniform float uSoftFill;
-  uniform float uCloudShadowStrength;
-  uniform float uCloudUVOffset;
-  uniform float uDebugMode;   // 0 normal, 1 normals, 2 sun ramp, 3 white sphere
-
-  varying vec2 vUv;
-  varying vec3 vWorldNormal;
-  varying vec3 vWorldPosition;
-
-  void main() {
-    vec3 normal = normalize(vWorldNormal);
-    vec3 sunDir = normalize(uSunDirection);
-    vec3 viewDir = normalize(cameraPosition - vWorldPosition);
-
-    // Hemisphere illumination: the Sun is infinitely distant, so lighting is
-    // purely dot(surfaceNormal, sunDir) — parallel directional rays. A smooth
-    // terminator band replaces the mathematically hard line. This calculation
-    // does not depend on clouds, atmosphere or anything else.
-    float sunDot = dot(normal, sunDir);
-    float dayFactor = smoothstep(-0.03, 0.28, sunDot);
-
-    // ---- Debug isolation modes ----
-    // Mode 3 = PURE WHITE SPHERE validation: ignores every texture and renders
-    // white * NdotL with the exact production Sun calculation. A correct setup
-    // shows one clean lit hemisphere, one dark hemisphere, a smooth terminator,
-    // and NO fixed dark patch tied to geography — the Sun sweep moves the lit
-    // hemisphere freely over the entire sphere.
-    //
-    // Debug isolation modes write straight into gl_FragColor instead of
-    // returning early: an early return would skip the tone-mapping and
-    // color-space includes at the end of main(), leaving the validation views
-    // in a different color space than the render they exist to validate.
-    if (uDebugMode > 2.5) {
-      gl_FragColor = vec4(vec3(max(dot(normal, sunDir), 0.0)), 1.0);
-    } else if (uDebugMode > 1.5) {
-      vec3 ramp = mix(vec3(0.08, 0.14, 0.55), vec3(1.0, 0.85, 0.35),
-                      smoothstep(-0.12, 0.12, sunDot));
-      gl_FragColor = vec4(ramp, 1.0);
-    } else if (uDebugMode > 0.5) {
-      gl_FragColor = vec4(normal * 0.5 + 0.5, 1.0);
-    } else {
-      // ---- Day side ----
-      // uDayTexture is an unlit, evenly illuminated albedo map (no baked
-      // directional lighting, no composite night imagery) — safe to multiply by
-      // the shader's own directional Sun light without double shading.
-      vec3 raw = texture2D(uDayTexture, vUv).rgb;
-      float lum = dot(raw, vec3(0.299, 0.587, 0.114));
-      // Ocean mask (used only for the specular sheen): open ocean in this albedo
-      // map is strongly blue-dominant with low luminance; land is not.
-      float oceanMask = smoothstep(0.28, 0.04, lum)
-                      * smoothstep(0.8, 1.2, raw.b / max(raw.r, 0.001));
-      vec3 dayColor = raw;
-
-      vec3 nightColor = texture2D(uNightTexture, vUv).rgb;
-      nightColor = pow(nightColor, vec3(0.9)) * uNightIntensity;
-
-      // Gentle sub-solar falloff: brightest near the sub-solar point, easing to
-      // the terminator. Broad and smooth — never a hotspot or a spotlight.
-      float sunFacing = clamp(sunDot, 0.0, 1.0);
-      // Soft Daylight (optional studio fill): lifts ONLY the shadowed day-side
-      // band (1 - sunFacing), leaving the sub-solar point untouched — a subtle
-      // rim-lift that keeps the spherical shading, never a flat wash.
-      float dayShade = 0.85 + 0.15 * sunFacing + uSoftFill * (1.0 - sunFacing);
-      vec3 dayLit = dayColor * dayShade;
-
-      vec3 color = mix(nightColor, dayLit, dayFactor);
-
-      // Broad, soft ocean glint (wide lobe, low intensity — reads as a sheen)
-      vec3 halfDir = normalize(sunDir + viewDir);
-      float spec = pow(max(dot(normal, halfDir), 0.0), 36.0);
-      color += spec * oceanMask * dayFactor * uOceanSpecular * vec3(0.75, 0.87, 1.0);
-
-      // Subtle cloud shadows: sample the *same* cloud coverage that the cloud
-      // layer renders, at the cloud layer's current UV. Cloud drift is a pure
-      // Y-axis rotation, which maps exactly to a u-offset in equirectangular
-      // space, so the shadow tracks the clouds. Zeroed when clouds are hidden.
-      if (uCloudShadowStrength > 0.0) {
-        float cloudDensity = texture2D(uCloudTexture,
-          vec2(fract(vUv.x - uCloudUVOffset), vUv.y)).a;
-        color *= 1.0 - uCloudShadowStrength * smoothstep(0.2, 0.85, cloudDensity) * dayFactor;
-      }
-
-      // Gentle limb darkening (thin atmosphere at the edge)
-      float fresnel = 1.0 - max(dot(normal, viewDir), 0.0);
-      color *= 1.0 - fresnel * 0.12;
-
-      // Warm glow at the terminator (sunrise / sunset band)
-      float terminator = (1.0 - smoothstep(0.0, 0.30, abs(sunDot))) * dayFactor;
-      vec3 sunsetColor = vec3(0.82, 0.44, 0.16);
-      color += sunsetColor * terminator * 0.10;
-
-      gl_FragColor = vec4(color, 1.0);
-    }
-
-    // Tone-mapping + output color-space conversion. Custom ShaderMaterials do
-    // NOT get these injected automatically — without them the linear output is
-    // written verbatim into an sRGB-expecting framebuffer and the renderer's
-    // toneMapping/toneMappingExposure settings are silently ignored.
-    #include <tonemapping_fragment>
-    #include <colorspace_fragment>
-  }
-`;
-
-const cloudVertexShader = /* glsl */ `
-  varying vec2 vUv;
-  varying vec3 vWorldNormal;
-  varying vec3 vWorldPosition;
-
-  void main() {
-    vUv = uv;
-    vWorldNormal = normalize(mat3(modelMatrix) * normal);
-    vec4 worldPos = modelMatrix * vec4(position, 1.0);
-    vWorldPosition = worldPos.xyz;
-    gl_Position = projectionMatrix * viewMatrix * worldPos;
-  }
-`;
-
-const cloudFragmentShader = /* glsl */ `
-  uniform sampler2D uCloudTexture;
-  uniform vec3 uSunDirection;
-  uniform float uOpacity;
-  uniform float uSoftFill;
-  uniform float uDebugMode;   // 0 normal, 1 normals, 2 sun ramp, 3 white sphere
-
-  varying vec2 vUv;
-  varying vec3 vWorldNormal;
-  varying vec3 vWorldPosition;
-
-  void main() {
-    vec3 normal = normalize(vWorldNormal);
-    vec3 sunDir = normalize(uSunDirection);
-    float sunDot = dot(normal, sunDir);
-    float dayFactor = smoothstep(-0.03, 0.28, sunDot);
-
-    // Order must match the earth shader (highest threshold first) so the
-    // white-sphere validation branch is reachable.
-    // Debug isolation modes write straight into gl_FragColor instead of
-    // returning early: an early return would skip the tone-mapping and
-    // color-space includes at the end of main(), leaving the validation views
-    // in a different color space than the render they exist to validate.
-    if (uDebugMode > 2.5) {
-      // Pure white sphere validation: exact same Sun calc as the surface.
-      gl_FragColor = vec4(vec3(max(sunDot, 0.0)), 1.0);
-    } else if (uDebugMode > 1.5) {
-      vec3 ramp = mix(vec3(0.08, 0.14, 0.55), vec3(1.0, 0.85, 0.35),
-                      smoothstep(-0.12, 0.12, sunDot));
-      gl_FragColor = vec4(ramp, 1.0);
-    } else if (uDebugMode > 0.5) {
-      gl_FragColor = vec4(normal * 0.5 + 0.5, 1.0);
-    } else {
-      // The satellite cloud map is white-with-alpha: the alpha channel IS the
-      // cloud density from the satellite image. Use it directly — no procedural
-      // noise modulation (that was producing uniform "cotton ball" coverage).
-      float d = texture2D(uCloudTexture, vUv).a;
-
-      // Density remap: suppress faint speckle below ~10% coverage, keep the
-      // wispy mid-range values (smoothstep gives a soft knee, not a hard
-      // threshold), and never clamp most of the disk to full white.
-      float density = smoothstep(0.10, 0.85, d);
-      if (density < 0.02) discard;
-
-      // Thin veils are slightly blue-grey; thick cumulus reads near-white.
-      // Off-white overall — clouds are not pure emissive white.
-      vec3 thin = vec3(0.78, 0.82, 0.88);
-      vec3 thick = vec3(0.96, 0.97, 1.0);
-      vec3 alb = mix(thin, thick, smoothstep(0.3, 0.95, d));
-
-      // Subtle sunlight response: brightness follows the same hemisphere
-      // illumination as the surface (same shared Sun direction).
-      float daylight = max(sunDot, 0.0);
-      // Same subtle Soft Daylight fill as the surface: lifts the day-side band
-      // away from the sub-solar point only, keeping cloud depth and shading.
-      vec3 dayCol = alb * (0.5 + 0.5 * daylight + uSoftFill * 0.5 * (1.0 - daylight));
-
-      // Night side: very dark, faint cool ambient only — no self-glow.
-      vec3 nightCol = alb * vec3(0.02, 0.025, 0.04);
-      vec3 col = mix(nightCol, dayCol, dayFactor);
-
-      // Warm terminator tint (sunrise/sunset on cloud tops), kept subtle.
-      float term = (1.0 - smoothstep(0.0, 0.35, abs(sunDot))) * dayFactor;
-      col += vec3(0.28, 0.13, 0.04) * term * 0.4;
-
-      // Thin clouds stay semi-transparent; night-side clouds dim but remain
-      // faintly visible against city lights.
-      float alpha = density * uOpacity * mix(0.35, 1.0, dayFactor);
-      gl_FragColor = vec4(col, alpha);
-    }
-
-    #include <tonemapping_fragment>
-    #include <colorspace_fragment>
-  }
-`;
-
-const atmosphereVertexShader = /* glsl */ `
-  varying vec3 vNormal;
-  varying vec3 vWorldPosition;
-
-  void main() {
-    vNormal = normalize(mat3(modelMatrix) * normal);
-    vec4 worldPos = modelMatrix * vec4(position, 1.0);
-    vWorldPosition = worldPos.xyz;
-    gl_Position = projectionMatrix * viewMatrix * worldPos;
-  }
-`;
-
-const atmosphereFragmentShader = /* glsl */ `
-  uniform vec3 uSunDirection;
-  uniform float uIntensity;
-
-  varying vec3 vNormal;
-  varying vec3 vWorldPosition;
-
-  void main() {
-    vec3 normal = normalize(vNormal);
-    vec3 viewDir = normalize(cameraPosition - vWorldPosition);
-    vec3 sunDir = normalize(uSunDirection);
-
-    float ndv = max(dot(normal, viewDir), 0.0);
-    float fresnel = pow(1.0 - ndv, 2.2);   // limb emphasis (0 at center, 1 at limb)
-    float sunDot = dot(normal, sunDir);
-
-    // Day-side blue Rayleigh scattering (only on the lit side)
-    float day = smoothstep(-0.05, 0.65, sunDot);
-    vec3 dayColor = vec3(0.30, 0.55, 1.0);
-
-    // Warm scattering around the terminator (sunrise / sunset band)
-    float term = (1.0 - smoothstep(0.0, 0.35, abs(sunDot))) * max(day, 0.15);
-    vec3 warmColor = vec3(0.90, 0.50, 0.30);
-
-    // Backlit rim: bright blue crescent when the Sun is behind the planet
-    float back = smoothstep(-0.1, -0.9, sunDot);
-    vec3 backColor = vec3(0.45, 0.70, 1.0);
-
-    vec3 color = dayColor * day * 0.7
-               + warmColor * term * 0.55
-               + backColor * back * 1.25;
-
-    // Everything scales with the limb factor so it never glows uniformly
-    // across the whole disk — it concentrates at the atmosphere edge.
-    float intensity = fresnel * uIntensity;
-    gl_FragColor = vec4(color * intensity, intensity);
-
-    #include <tonemapping_fragment>
-    #include <colorspace_fragment>
-  }
-`;
-
-// ---------------------------------------------------------------------------
-// MOON SHADERS
-//
-// The Moon is lit by a TRUE POINT SOURCE: its uSunDirection uniform is
-// `this.moonSunDir`, a distinct per-frame vector set in animate() via
-// sunDirectionToward(sunWorldPos, moonPosition, …). The Moon orbits ~10–60
-// units from the Sun's world position while Earth sits at the origin, so its
-// light direction differs slightly from Earth's — exactly what yields correct,
-// screen-consistent lunar phases (a shared parallel-ray direction would show
-// the identical phase on both bodies, which is physically wrong).
-//
-// Deliberate absences (per design): no atmosphere, no sunset band, no soft
-// fill, negligible night ambient. The terminator is sharp — there is no air
-// to scatter light.
-//
-// Relief: no bump/height asset is shipped, but lunar albedo is a usable
-// height proxy — bright highlands and ray craters are topographically high,
-// dark maria sit low. The fragment shader samples that luminance field in a
-// tangent basis and perturbs the normal, so the shared directional Sun carves
-// real crater rims and mare floors from the same real lunar imagery.
-// ---------------------------------------------------------------------------
-
-const moonVertexShader = /* glsl */ `
-  varying vec2 vUv;
-  varying vec3 vWorldNormal;
-  varying vec3 vWorldPosition;
-
-  void main() {
-    vUv = uv;
-
-    // Uniform scale on the moon transform keeps this world normal valid.
-    vWorldNormal = normalize(mat3(modelMatrix) * normal);
-
-    vec4 worldPos = modelMatrix * vec4(position, 1.0);
-    vWorldPosition = worldPos.xyz;
-
-    gl_Position = projectionMatrix * viewMatrix * worldPos;
-  }
-`;
-
-const moonFragmentShader = /* glsl */ `
-  uniform sampler2D uTexture;
-  uniform vec3 uSunDirection;
-  uniform float uBumpScale;
-  uniform float uDebugMode; // 0: normal, 1: normals, 2: sun ramp, 3: white sphere
-
-  varying vec2 vUv;
-  varying vec3 vWorldNormal;
-  varying vec3 vWorldPosition;
-
-  // Albedo luminance as a height proxy (documented approximation derived
-  // from real lunar imagery; see section comment above).
-  float sampleHeight(vec2 uv) {
-    vec3 c = texture2D(uTexture, uv).rgb;
-    return dot(c, vec3(0.299, 0.587, 0.114));
-  }
-
-  void main() {
-    vec3 normal = normalize(vWorldNormal);
-    vec3 sunDir = normalize(uSunDirection);
-    float sunDot = dot(normal, sunDir);
-
-    // Debug modes (same palette as Earth for parity).
-    if (uDebugMode > 2.5) {
-      gl_FragColor = vec4(vec3(max(sunDot, 0.0)), 1.0);
-      #include <tonemapping_fragment>
-      #include <colorspace_fragment>
-      return;
-    }
-    if (uDebugMode > 1.5) {
-      vec3 ramp = mix(vec3(0.08, 0.14, 0.55), vec3(1.0, 0.85, 0.35), smoothstep(-0.12, 0.12, sunDot));
-      gl_FragColor = vec4(ramp, 1.0);
-      #include <tonemapping_fragment>
-      #include <colorspace_fragment>
-      return;
-    }
-    if (uDebugMode > 0.5) {
-      gl_FragColor = vec4(normal * 0.5 + 0.5, 1.0);
-      #include <tonemapping_fragment>
-      #include <colorspace_fragment>
-      return;
-    }
-
-    // Tangent-space relief from the luminance height proxy.
-    vec3 up = (abs(normal.y) > 0.99) ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
-    vec3 tangent = normalize(cross(up, normal));
-    vec3 bitangent = cross(normal, tangent);
-    float e = 0.0025;
-    float hR = sampleHeight(vec2(fract(vUv.x + e), vUv.y));
-    float hL = sampleHeight(vec2(fract(vUv.x - e), vUv.y));
-    float hT = sampleHeight(vec2(vUv.x, min(vUv.y + e, 0.999)));
-    float hB = sampleHeight(vec2(vUv.x, max(vUv.y - e, 0.001)));
-    vec3 relNormal = normalize(normal
-      - tangent * (hR - hL) * uBumpScale
-      - bitangent * (hT - hB) * uBumpScale);
-    float relSunDot = dot(relNormal, sunDir);
-
-    // Dry regolith: diffuse-only. Sharp terminator: small smoothstep just to
-    // avoid aliasing — no warm sunset band, no atmospheric scatter.
-    vec3 albedo = texture2D(uTexture, vUv).rgb;
-    float day = smoothstep(-0.015, 0.06, relSunDot);
-    // Night side is genuinely dark; a whisper of earthshine keeps it out of
-    // pure black (1.5% albedo).
-    vec3 color = albedo * (max(relSunDot, 0.0) * day + 0.015 * (1.0 - day));
-
-    gl_FragColor = vec4(color, 1.0);
-    #include <tonemapping_fragment>
-    #include <colorspace_fragment>
-  }
-`;
-
-// ---------------------------------------------------------------------------
-// STAR SHADERS
-// ---------------------------------------------------------------------------
-
-const starVertexShader = /* glsl */ `
-  attribute float aSize;
-  attribute float aBrightness;
-  varying float vBrightness;
-
-  void main() {
-    vBrightness = aBrightness;
-    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-    gl_PointSize = aSize * (600.0 / -mvPosition.z); // 600: stars sit at 200–350
-    gl_Position = projectionMatrix * mvPosition;
-  }
-`;
-
-const starFragmentShader = /* glsl */ `
-  varying float vBrightness;
-
-  void main() {
-    float dist = length(gl_PointCoord - vec2(0.5));
-    if (dist > 0.5) discard;
-    float alpha = smoothstep(0.5, 0.0, dist) * vBrightness;
-    gl_FragColor = vec4(vec3(0.9, 0.92, 1.0), alpha);
-
-    #include <tonemapping_fragment>
-    #include <colorspace_fragment>
-  }
-`;
-
-// ============================================================
-// SUN DIRECTION MODEL
-// ============================================================
-// The authoritative Sun state lives in `SunLightingState` (SunLighting.ts) —
-// one normalized direction vector shared by the Earth surface, city lights,
-// clouds, atmosphere and ocean specular. Azimuth/elevation semantics:
-// az=+90 => toward the default camera at +Z, az=-90 => away => backlit.
-// Elevation is the angle above the equatorial (XZ) plane.
-
-// Initial composition: ~76% of the visible hemisphere lit, terminator near one
-// edge, city lights beginning on the dark limb.
-const INITIAL_SUN_AZIMUTH = 150;   // degrees, -180..180
-const INITIAL_SUN_ELEVATION = 18;  // degrees, -90..90
-
-// The Sun as a real scene object: radius 2.8 at distance 600 gives an apparent
-// size of ~0.53° from Earth (2·atan(2.8/600)) — the same as the actual Sun —
-// while the distance sits well outside the star field (200–350), so stars still
-// read as an infinitely distant backdrop. 600 ≫ the Moon orbit (≤ 60.3), so its
-// light behaves like a true distant point source with physically correct parallax.
-const SUN_RADIUS = 2.8;
-const SUN_DISTANCE = 600;
-
-function wrapAzimuth(deg: number): number {
-  return ((deg + 180) % 360 + 360) % 360 - 180;
-}
-
-// ============================================================
-// MOON CONSTANTS (Earth radius = 1 scene unit)
-// ============================================================
-const MOON_RADIUS = 0.2727;                    // 1737.4 / 6371 km (exact size ratio)
-const MOON_ORBIT_EXPLORE = 10;                 // Exploration scale, center-to-center
-const MOON_ORBIT_REAL = 60.3;                  // true mean distance, in Earth radii
-const MOON_ORBIT_INCLINATION = (5.145 * Math.PI) / 180; // real mean orbital tilt
-const INITIAL_MOON_ANGLE = (-60 * Math.PI) / 180;       // starts right of Earth, not behind it
-const MOON_ORBIT_PERIOD_VISUAL = 60;           // seconds per orbit, "Visualized" mode
-const MOON_ORBIT_PERIOD_REALTIME = 27.32 * 24 * 3600;   // sidereal month, seconds
-
-type Focus = 'earth' | 'moon' | 'sun' | 'system';
-type MoonOrbitMode = 'paused' | 'visualized' | 'realtime';
-type ScaleMode = 'explore' | 'real';
-
-/** Camera framing for a focus target. */
-interface CameraPose {
-  position: THREE.Vector3;
-  target: THREE.Vector3;
-  minDistance: number;
-  maxDistance: number;
-}
+//   sizes/distances      -> src/config/sceneScale.ts
+//   camera + controls    -> src/config/camera.ts
+//   shared types         -> src/core/types.ts
+//   Sun state + vector   -> src/lighting/SunLighting.ts
+// (All of the above are imported at the top of this file.)
 
 // ============================================================
 // EARTH SCENE CLASS
@@ -481,6 +71,8 @@ export class EarthScene {
   private container: HTMLElement;
   private renderer: THREE.WebGLRenderer;
   private composer: EffectComposer | null = null;
+  /** Live bloom pass (null on the performance tier, which skips it). */
+  private bloomPass: UnrealBloomPass | null = null;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
   private controls: OrbitControls;
@@ -538,14 +130,27 @@ export class EarthScene {
   /** True once dispose() has run — in-flight texture loads must not attach. */
   private disposed = false;
 
-  private initialCameraPosition = new THREE.Vector3(0, 0.5, 3.2);
-  private initialTarget = new THREE.Vector3(0, 0, 0);
+  private initialCameraPosition = INITIAL_CAMERA_POSITION.clone();
+  private initialTarget = INITIAL_TARGET.clone();
 
   private animationId: number | null = null;
   /** Handle for the in-flight reset-view transition (at most one at a time). */
   private resetAnimId: number | null = null;
 
-  private state = { autoRotate: true, atmosphere: true, clouds: true, stars: true, autoSun: false, fullDaylight: false };
+  // Respect reduced-motion users from the very first frame: no idle spin.
+  private state = { autoRotate: !prefersReducedMotion(), atmosphere: true, clouds: true, stars: true, autoSun: false, fullDaylight: false };
+
+  // ------------------------------------------------------------
+  // ADAPTIVE QUALITY (see Quality.ts)
+  // ------------------------------------------------------------
+  /** User setting (persisted choice); `auto` resolves from device signals. */
+  private qualitySetting: QualitySetting = 'auto';
+  /** The concrete profile currently applied to the renderer/scene. */
+  private quality: QualityProfile | null = null;
+  /** Textures already fetched, keyed by file path — live tier switches reuse them. */
+  private textureCache = new Map<string, THREE.Texture>();
+  /** Runtime FPS guard state (Auto only; steps down, never up). */
+  private fpsGuard = { acc: 0, frames: 0, lastEval: 0, cooldownUntil: 0, appliedDowngrade: 0 };
 
   // ------------------------------------------------------------
   // MOON + NAVIGATION
@@ -571,6 +176,14 @@ export class EarthScene {
   private raycaster = new THREE.Raycaster();
   private _tap = { downX: 0, downY: 0, downT: 0 };
 
+  /**
+   * Invisible enlarged raycast targets — real picking hit areas that are
+   * comfortably tappable on touch even when the Moon is a sliver in the
+   * System view. Material is invisible (renderer skips it) but raycastable,
+   * so they never draw anything.
+   */
+  private hitProxies: { mesh: THREE.Mesh; focus: Focus }[] = [];
+
   // Textures created in loadEarth — material.dispose() does NOT dispose them.
   private textures: THREE.Texture[] = [];
 
@@ -579,6 +192,9 @@ export class EarthScene {
   constructor(container: HTMLElement) {
     this.container = container;
     this.clock = new THREE.Clock();
+    // Quality must exist before the renderer: pixel-ratio cap, bloom and
+    // tessellation all come from it.
+    this.quality = resolveProfile(this.qualitySetting);
     this.renderer = this.createRenderer();
     this.scene = new THREE.Scene();
     this.camera = this.createCamera();
@@ -607,6 +223,7 @@ export class EarthScene {
     this.setupUI();
     this.setupSunUI();
     this.bindSelection();
+    this.createHitProxies();
     this.moonLabelEl = document.getElementById('moon-label');
     if (this.debugEnabled) this.setupDebugPanel();
     this.animate();
@@ -627,6 +244,18 @@ export class EarthScene {
 
   private applyURLParams(): void {
     const params = new URLSearchParams(window.location.search);
+    // Quality: ?quality=auto|high|balanced|performance > saved preference.
+    const qParam = params.get('quality');
+    if (qParam === 'auto' || qParam === 'high' || qParam === 'balanced' || qParam === 'performance') {
+      this.qualitySetting = qParam;
+    } else {
+      try {
+        const saved = localStorage.getItem('earth-quality');
+        if (saved === 'auto' || saved === 'high' || saved === 'balanced' || saved === 'performance') {
+          this.qualitySetting = saved;
+        }
+      } catch { /* private mode */ }
+    }
     if (params.has('debug')) this.debugEnabled = true;
     if (params.get('clouds') === '0') this.state.clouds = false;
     if (params.get('atmosphere') === '0') this.state.atmosphere = false;
@@ -675,34 +304,64 @@ export class EarthScene {
       alpha: false,
       powerPreference: 'high-performance',
     });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // NEVER raw window.devicePixelRatio: modern phones report 3 and the
+    // extra fill-rate silently destroys the frame budget. Cap per quality
+    // tier (2 / 1.75 / 1.5).
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, this.quality!.pixelRatioCap));
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setClearColor(0x000000, 1);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.1;
+    // OrbitControls already sets touch-action:none on the canvas, so one-finger
+    // orbit and two-finger pinch own the gestures here and the page never
+    // scrolls/zooms under them — while UI panels keep normal touch behavior.
+    renderer.domElement.style.touchAction = 'none';
+    renderer.domElement.style.width = '100%';
+    renderer.domElement.style.height = '100%';
     this.container.appendChild(renderer.domElement);
+
     window.addEventListener('resize', this.onResize);
+    // Mobile browsers do not always fire `resize` promptly on rotation —
+    // orientationchange is the reliable signal, and visualViewport covers
+    // address-bar-driven layout changes on iOS/Android.
+    window.addEventListener('orientationchange', this.onOrientationChange);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', this.onResize);
+    }
+    // Returning from bfcache (iOS back/forward) can leave a stale size.
+    window.addEventListener('pageshow', this.onResize);
     return renderer;
   }
+
+  /** Debounced: rotation settles, then reframe if the focus body is cropped. */
+  private reframeTimer: number | null = null;
+  private onOrientationChange = (): void => {
+    this.onResize();
+    if (this.reframeTimer != null) clearTimeout(this.reframeTimer);
+    this.reframeTimer = window.setTimeout(() => {
+      this.reframeTimer = null;
+      this.reframeIfOutOfFrame();
+    }, ORIENTATION_REFRAME_MS);
+  };
 
   private createCamera(): THREE.PerspectiveCamera {
     // Far plane covers the Real-Scale Moon (center-to-center 60.3) with the
     // camera pulled out to ~100 for the System view; the star field lives
     // at 200–350, well inside the frustum.
-    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 2400);
+    const camera = new THREE.PerspectiveCamera(CAMERA_FOV, window.innerWidth / window.innerHeight, CAMERA_NEAR, CAMERA_FAR);
     camera.position.copy(this.initialCameraPosition);
     return camera;
   }
 
   private createControls(): OrbitControls {
     const controls = new OrbitControls(this.camera, this.renderer.domElement);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.05;
-    controls.minDistance = 1.3;
-    controls.maxDistance = 8;
-    controls.enablePan = false;
-    controls.rotateSpeed = 0.5;
-    controls.zoomSpeed = 0.8;
+    controls.enableDamping = CONTROLS.enableDamping;
+    controls.dampingFactor = CONTROLS.dampingFactor;
+    controls.minDistance = CONTROLS.minDistance;
+    controls.maxDistance = CONTROLS.maxDistance;
+    controls.enablePan = CONTROLS.enablePan;
+    controls.rotateSpeed = CONTROLS.rotateSpeed;
+    controls.zoomSpeed = CONTROLS.zoomSpeed;
 
     controls.addEventListener('start', () => {
       this.isInteracting = true;
@@ -717,10 +376,72 @@ export class EarthScene {
 
     controls.addEventListener('end', () => {
       if (this.interactionTimeout) clearTimeout(this.interactionTimeout);
-      this.interactionTimeout = setTimeout(() => { this.isInteracting = false; }, 2000);
+      this.interactionTimeout = setTimeout(() => { this.isInteracting = false; }, INTERACTION_SETTLE_MS);
     });
 
     return controls;
+  }
+
+  // ------------------------------------------------------------
+  // ASSET LOADING — tier-aware, real fallbacks, progress reporting
+  // ------------------------------------------------------------
+  /** Five tracked assets: day, night, clouds, moon, sun. */
+  private loadingAssets = { total: 5, done: 0 };
+
+  /** Report asset progress on the loading overlay (no-op after load done). */
+  private trackAsset<T>(label: string, promise: Promise<T>): Promise<T> {
+    const lab = document.getElementById('loading-label');
+    if (lab) lab.textContent = label;
+    return promise.finally(() => {
+      this.loadingAssets.done = Math.min(this.loadingAssets.done + 1, this.loadingAssets.total);
+      const pct = Math.round((this.loadingAssets.done / this.loadingAssets.total) * 100);
+      const bar = document.getElementById('loading-fill');
+      if (bar) bar.style.width = pct + '%';
+      if (this.loadingAssets.done >= this.loadingAssets.total) {
+        const overlay = document.getElementById('loading');
+        if (overlay) {
+          overlay.classList.add('done');
+          setTimeout(() => overlay.remove(), 800);
+        }
+      }
+    });
+  }
+
+  /**
+   * Load a texture from the current tier's file list, falling through in
+   * order (high-res → low-res real asset, or vice versa) so a failed download
+   * degrades gracefully instead of killing the scene. Results are cached by
+   * path so live tier switches swap instantly.
+   */
+  private async loadTextureKey(
+    loader: THREE.TextureLoader,
+    key: 'day' | 'night' | 'clouds' | 'moon' | 'sun',
+  ): Promise<THREE.Texture> {
+    const set = this.quality!.textureSet;
+    const paths = TEXTURE_PATHS[key][set];
+    let lastErr: unknown = null;
+    for (const path of paths) {
+      const cached = this.textureCache.get(path);
+      if (cached) return cached;
+      try {
+        const tex = await loader.loadAsync(path);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        if (this.quality!.anisotropy > 0) {
+          tex.anisotropy = Math.min(
+            this.renderer.capabilities.getMaxAnisotropy(),
+            this.quality!.anisotropy,
+          );
+        }
+        this.textureCache.set(path, tex);
+        this.textures.push(tex);
+        return tex;
+      } catch (err) {
+        // Real lower-res fallback next (spec: never fake textures, never crash).
+        lastErr = err;
+        console.warn(`Asset ${key}: ${path} failed; trying next source`, err);
+      }
+    }
+    throw lastErr ?? new Error(`No source available for ${key}`);
   }
 
   // ------------------------------------------------------------
@@ -731,12 +452,11 @@ export class EarthScene {
     loader.setCrossOrigin('anonymous');
 
     const [dayTexture, nightTexture] = await Promise.all([
-      loader.loadAsync('/assets/earth/earth-day-albedo.jpg'),
-      loader.loadAsync('/assets/earth/earth-night.jpg'),
+      this.trackAsset('Earth · day map', this.loadTextureKey(loader, 'day')),
+      this.trackAsset('Earth · night lights', this.loadTextureKey(loader, 'night')),
     ]);
+    this.loadedAtTier = this.quality!.tier;
 
-    dayTexture.colorSpace = THREE.SRGBColorSpace;
-    nightTexture.colorSpace = THREE.SRGBColorSpace;
     this.textures.push(dayTexture, nightTexture);
 
     // Both cloud consumers sample only the alpha channel, so a 1x1 fully
@@ -753,7 +473,8 @@ export class EarthScene {
     // The surface independently renders a correct day/night hemisphere from
     // (texture + geometry + shared Sun direction) — no dependence on clouds,
     // atmosphere or post-processing.
-    const earthGeometry = new THREE.SphereGeometry(1, 128, 64);
+    const seg = this.quality!.sphereSegments.earth;
+    const earthGeometry = new THREE.SphereGeometry(1, seg[0], seg[1]);
     const earthMaterial = new THREE.ShaderMaterial({
       vertexShader: earthVertexShader,
       fragmentShader: earthFragmentShader,
@@ -780,7 +501,8 @@ export class EarthScene {
     // Cloud layer (slightly larger) — a satellite cloud map (white with an
     // alpha density channel) rendered as a semi-transparent shell with the
     // same hemisphere lighting model as the surface.
-    const cloudGeometry = new THREE.SphereGeometry(1.01, 96, 48);
+    const cseg = this.quality!.sphereSegments.cloud;
+    const cloudGeometry = new THREE.SphereGeometry(1.01, cseg[0], cseg[1]);
     const cloudMaterial = new THREE.ShaderMaterial({
       vertexShader: cloudVertexShader,
       fragmentShader: cloudFragmentShader,
@@ -813,15 +535,14 @@ export class EarthScene {
     // The cloud map arrives independently of first paint. Swap it into both
     // materials when it does — they only ever read .a, so the placeholder and
     // the real map are interchangeable from the shaders' point of view.
-    loader.loadAsync('/assets/earth/earth-clouds.png')
+    // (Tier-aware path + real fallback via loadTextureKey; non-blocking.)
+    this.trackAsset('Earth · clouds', this.loadTextureKey(loader, 'clouds'))
       .then((cloudTexture) => {
         if (this.disposed) {
           // Scene went away while loading — don't leak the texture.
           cloudTexture.dispose();
           return;
         }
-        cloudTexture.colorSpace = THREE.SRGBColorSpace;
-        this.textures.push(cloudTexture);
         earthMaterial.uniforms.uCloudTexture.value = cloudTexture;
         cloudMaterial.uniforms.uCloudTexture.value = cloudTexture;
       })
@@ -830,7 +551,8 @@ export class EarthScene {
       });
 
     // Atmosphere glow (largest sphere)
-    const atmoGeometry = new THREE.SphereGeometry(1.08, 64, 32);
+    const aseg = this.quality!.sphereSegments.atmosphere;
+    const atmoGeometry = new THREE.SphereGeometry(1.08, aseg[0], aseg[1]);
     const atmoMaterial = new THREE.ShaderMaterial({
       vertexShader: atmosphereVertexShader,
       fragmentShader: atmosphereFragmentShader,
@@ -853,7 +575,7 @@ export class EarthScene {
     this.createMoon(loader);
 
     // Star background
-    this.starField = this.createStarField();
+    this.starField = createStarField(this.scene, this.quality!.starCount);
     this.starField.visible = this.state.stars;
 
     // Debug: Sun direction ray (hidden unless toggled). The Sun is infinitely
@@ -871,6 +593,15 @@ export class EarthScene {
     // QA URL params that need the materials to exist before applying.
     if (this.pendingSoftfill) this.setSoftDaylight(true);
     if (this.pendingFrontlight) this.setFullDaylight(true);
+
+    // If the quality tier changed while the first-paint assets were loading
+    // (e.g. a fast UI toggle), re-apply the levers now that all consumers exist
+    // — this also pulls in the newly-requested texture set.
+    if (this.loadedAtTier && this.loadedAtTier !== this.quality!.tier) {
+      this.applyQualityLevers(QUALITY_PROFILES[this.loadedAtTier]);
+    } else {
+      this.applyQualityLevers(this.quality!);
+    }
 
     // Focus requested before the Moon existed (URL param or fast UI click).
     if (this.pendingFocus) {
@@ -914,67 +645,11 @@ export class EarthScene {
         uHasMap: { value: 0.0 },
         uTime: { value: 0.0 },
       },
-      vertexShader: `
-        varying vec2 vUv;
-        varying vec3 vNormalW;
-        varying vec3 vPosW;
-        void main() {
-          vUv = uv;
-          vNormalW = normalize(mat3(modelMatrix) * normal);
-          vec4 worldPos = modelMatrix * vec4(position, 1.0);
-          vPosW = worldPos.xyz;
-          gl_Position = projectionMatrix * viewMatrix * worldPos;
-        }
-      `,
-      fragmentShader: `
-        uniform sampler2D uMap;
-        uniform float uHasMap;
-        uniform float uTime;
-        varying vec2 vUv;
-        varying vec3 vNormalW;
-        varying vec3 vPosW;
-
-        float sHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123); }
-        float sNoise(vec2 p) {
-          vec2 i = floor(p);
-          vec2 f = fract(p);
-          f = f * f * (3.0 - 2.0 * f);
-          float a = sHash(i);
-          float b = sHash(i + vec2(1.0, 0.0));
-          float c = sHash(i + vec2(0.0, 1.0));
-          float d = sHash(i + vec2(1.0, 1.0));
-          return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-        }
-        float sFbm(vec2 p) {
-          float v = 0.0;
-          float a = 0.5;
-          for (int i = 0; i < 5; i++) { v += a * sNoise(p); p *= 2.03; a *= 0.5; }
-          return v;
-        }
-
-        void main() {
-          vec3 N = normalize(vNormalW);
-          vec3 V = normalize(cameraPosition - vPosW);
-          float ndv = clamp(dot(N, V), 0.0, 1.0);
-
-          // Real solar disk (SDO 4K) with a procedural granulation fallback.
-          vec3 tex = texture2D(uMap, vUv).rgb;
-          vec3 procedural = mix(vec3(1.0, 0.52, 0.14), vec3(1.0, 0.92, 0.62),
-                                sFbm(vUv * vec2(26.0, 13.0)));
-          vec3 base = mix(procedural, tex, uHasMap);
-
-          // Slowly drifting granulation — convection cells on the surface.
-          float gran = sFbm(vUv * vec2(48.0, 24.0) + vec2(uTime * 0.005, uTime * 0.003));
-          base *= 0.92 + 0.16 * gran;
-
-          // Limb darkening: the solar disk dims measurably toward the limb.
-          float limb = 0.42 + 0.58 * pow(ndv, 0.5);
-
-          gl_FragColor = vec4(base * limb * 1.55, 1.0);
-        }
-      `,
+      vertexShader: sunVertexShader,
+      fragmentShader: sunFragmentShader,
     });
-    const mesh = new THREE.Mesh(new THREE.SphereGeometry(SUN_RADIUS, 96, 96), material);
+    const sseg = this.quality!.sphereSegments.sun;
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(SUN_RADIUS, sseg[0], sseg[1]), material);
     group.add(mesh);
 
     // Corona: a billboard halo centered on the Sun. Its center sits behind
@@ -985,7 +660,7 @@ export class EarthScene {
       blending: THREE.AdditiveBlending,
       transparent: true,
       depthWrite: false,
-      opacity: 0.9,
+      opacity: this.quality!.coronaOpacity,
     }));
     corona.scale.setScalar(SUN_RADIUS * 5.5);
     group.add(corona);
@@ -1032,19 +707,16 @@ export class EarthScene {
     this.sunGroup.position.copy(this.sunWorldPos);
   }
 
-  /** Swap the 4K solar map into the photosphere when it lands. */
+  /** Swap the tier-appropriate solar map into the photosphere when it lands. */
   private loadSun(): void {
     const loader = new THREE.TextureLoader();
     loader.setCrossOrigin('anonymous');
-    loader.loadAsync('/assets/sun/sun-4k.jpg')
+    this.trackAsset('Sun · photosphere', this.loadTextureKey(loader, 'sun'))
       .then((tex) => {
         if (this.disposed) {
           tex.dispose();
           return;
         }
-        tex.colorSpace = THREE.SRGBColorSpace;
-        tex.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
-        this.textures.push(tex);
         if (this.sunMaterial) {
           this.sunMaterial.uniforms.uMap.value = tex;
           this.sunMaterial.uniforms.uHasMap.value = 1.0;
@@ -1077,12 +749,24 @@ export class EarthScene {
     );
     const renderTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
       type: THREE.HalfFloatType,
-      samples: 4, // keep the same MSAA quality as direct rendering
+      // MSAA is a pure mobile cost: the performance tier drops it entirely.
+      samples: this.quality!.msaaSamples,
     });
     const composer = new EffectComposer(this.renderer, renderTarget);
     composer.addPass(new RenderPass(this.scene, this.camera));
-    const bloom = new UnrealBloomPass(size, 0.7, 0.5, 1.25);
-    composer.addPass(bloom);
+    // Soft selective bloom — only the Sun and the brightest limb/specular
+    // highlights exceed the threshold; the rest of the scene stays crisp.
+    // The performance tier skips the pass (11 extra render targets) entirely.
+    if (this.quality!.bloom.enabled) {
+      const bloom = new UnrealBloomPass(
+        size,
+        this.quality!.bloom.strength,
+        this.quality!.bloom.radius,
+        this.quality!.bloom.threshold,
+      );
+      composer.addPass(bloom);
+      this.bloomPass = bloom;
+    }
     composer.addPass(new OutputPass());
     // EffectComposer's constructor sets _width/_height from the (device-pixel)
     // renderTarget size; normalise them to LOGICAL pixels so setSize() /
@@ -1093,123 +777,228 @@ export class EarthScene {
   }
 
   // ------------------------------------------------------------
-  // STAR FIELD
+  // UI — ONE DOM, TWO LAYOUTS
   // ------------------------------------------------------------
-  private createStarField(): THREE.Points {
-    const starCount = 12000;
-    const positions = new Float32Array(starCount * 3);
-    const sizes = new Float32Array(starCount);
-    const brightness = new Float32Array(starCount);
+  // The buttons live in a single set of elements (#primary-bar + #sheet).
+  // Desktop CSS unfolds them into the classic panels; mobile CSS folds them
+  // into a bottom sheet. All interaction is delegated to <body>, so the
+  // same handler serves both layouts and both pointer types.
+  private uiHandler = (e: Event): void => {
+    const el = (e.target as HTMLElement | null)?.closest('[data-focus],[data-orbit],[data-scale],[data-action],[data-quality]') as HTMLElement | null;
+    if (!el) return;
 
-    for (let i = 0; i < starCount; i++) {
-      const theta = Math.random() * Math.PI * 2;
-      const phi = Math.acos(2 * Math.random() - 1);
-      // 200–350: beyond the Real-Scale Moon orbit (60.3) so stars always sit
-      // behind both bodies, never between the camera and the Moon.
-      const radius = 200 + Math.random() * 150;
-      positions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
-      positions[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
-      positions[i * 3 + 2] = radius * Math.cos(phi);
-      sizes[i] = 0.5 + Math.random() * 1.5;
-      brightness[i] = 0.3 + Math.random() * 0.7;
+    const focus = el.dataset.focus as Focus | undefined;
+    if (focus) {
+      this.setFocus(focus);
+      this.collapseSheet(); // the user wants to LOOK, not read settings
+      return;
     }
 
-    const starGeometry = new THREE.BufferGeometry();
-    starGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    starGeometry.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
-    starGeometry.setAttribute('aBrightness', new THREE.BufferAttribute(brightness, 1));
+    const orbit = el.dataset.orbit as MoonOrbitMode | undefined;
+    if (orbit) { this.setMoonOrbit(orbit); return; }
 
-    const starMaterial = new THREE.ShaderMaterial({
-      vertexShader: starVertexShader,
-      fragmentShader: starFragmentShader,
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    });
+    const scale = el.dataset.scale as ScaleMode | undefined;
+    if (scale) { this.setScaleMode(scale); return; }
 
-    const starField = new THREE.Points(starGeometry, starMaterial);
-    starField.renderOrder = 0; // explicit transparent order: stars < clouds < atmosphere
-    this.scene.add(starField);
-    return starField;
-  }
+    const quality = el.dataset.quality as QualitySetting | undefined;
+    if (quality) { this.setQuality(quality); return; }
 
-  // ------------------------------------------------------------
-  // UI
-  // ------------------------------------------------------------
+    // Sun presets / Full Daylight / soft fill are owned by setupSunUI's
+    // dedicated listeners (they must stay in sync with panel state) — the
+    // delegated handler deliberately skips [data-preset] and sun-mode buttons.
+    const action = el.dataset.action;
+    switch (action) {
+      case 'reset': this.resetView(); break;
+      case 'auto-rotate':
+        this.state.autoRotate = !this.state.autoRotate;
+        this.syncUIButtons();
+        break;
+      case 'atmosphere':
+        this.state.atmosphere = !this.state.atmosphere;
+        if (this.atmosphereMesh) this.atmosphereMesh.visible = this.state.atmosphere;
+        this.syncUIButtons();
+        break;
+      case 'clouds':
+        this.state.clouds = !this.state.clouds;
+        if (this.cloudMesh) this.cloudMesh.visible = this.state.clouds;
+        // Cloud visibility is a pure layer toggle: it never changes the Sun,
+        // the surface lighting or the terminator. Only the surface cloud
+        // shadows (part of the cloud layer) switch with it.
+        if (this.earthMaterial) {
+          this.earthMaterial.uniforms.uCloudShadowStrength.value =
+            this.state.clouds ? 0.2 : 0.0;
+        }
+        this.syncUIButtons();
+        break;
+      case 'fullscreen': this.toggleFullscreen(); break;
+    }
+  };
+
   private setupUI(): void {
-    const controlsEl = document.getElementById('ui-controls');
-    if (!controlsEl) return;
-
-    controlsEl.addEventListener('click', (e) => {
-      const btn = (e.target as HTMLElement).closest('.ui-btn') as HTMLElement | null;
-      if (!btn) return;
-      const action = btn.dataset.action;
-
-      switch (action) {
-        case 'reset': this.resetView(); break;
-        case 'auto-rotate':
-          this.state.autoRotate = !this.state.autoRotate;
-          btn.classList.toggle('active', this.state.autoRotate);
-          break;
-        case 'atmosphere':
-          this.state.atmosphere = !this.state.atmosphere;
-          btn.classList.toggle('active', this.state.atmosphere);
-          if (this.atmosphereMesh) this.atmosphereMesh.visible = this.state.atmosphere;
-          break;
-        case 'clouds':
-          this.state.clouds = !this.state.clouds;
-          btn.classList.toggle('active', this.state.clouds);
-          if (this.cloudMesh) this.cloudMesh.visible = this.state.clouds;
-          // Cloud visibility is a pure layer toggle: it never changes the Sun,
-          // the surface lighting or the terminator. Only the surface cloud
-          // shadows (part of the cloud layer) switch with it.
-          if (this.earthMaterial) {
-            this.earthMaterial.uniforms.uCloudShadowStrength.value =
-              this.state.clouds ? 0.2 : 0.0;
-          }
-          break;
-        case 'fullscreen': this.toggleFullscreen(); break;
-      }
-    });
+    // Single delegated handler — survives any responsive re-parenting.
+    document.body.addEventListener('click', this.uiHandler);
 
     // Initial sync pass: URL params (?clouds=0, ?atmosphere=0, ?rotate=0) may
     // have changed the state before this ran — reflect it in the button
-    // "active" classes so the buttons can't read inverted from the scene.
+    // "active" classes so the UI never lies about the scene.
     this.syncUIButtons();
 
-    // Explore panel: focus selector + Moon orbit mode + distance scale.
-    const focusPanel = document.getElementById('focus-panel');
-    if (focusPanel) {
-      focusPanel.addEventListener('click', (e) => {
-        const btn = (e.target as HTMLElement).closest(
-          'button[data-focus], button[data-orbit], button[data-scale]',
-        ) as HTMLElement | null;
-        if (!btn) return;
-        if (btn.dataset.focus) this.setFocus(btn.dataset.focus as Focus);
-        else if (btn.dataset.orbit) this.setMoonOrbit(btn.dataset.orbit as MoonOrbitMode);
-        else if (btn.dataset.scale) this.setScaleMode(btn.dataset.scale as ScaleMode);
+    // Fullscreen does not exist for documents on iOS Safari — hide the
+    // control instead of shipping a dead button.
+    const fsBtns = Array.from(document.querySelectorAll('[data-action="fullscreen"]'));
+    if (!EarthScene.fullscreenSupported()) {
+      fsBtns.forEach((b) => { (b as HTMLElement).hidden = true; });
+    } else {
+      document.addEventListener('fullscreenchange', () => {
+        const on = document.fullscreenElement != null;
+        fsBtns.forEach((b) => (b as HTMLElement).classList.toggle('active', on));
       });
-      // Reflect URL-param state (?focus, ?orbit, ?scale) in the segmented
-      // buttons so they never read inverted from the scene.
-      this.syncFocusUI();
-      focusPanel.querySelectorAll('[data-orbit]').forEach((el) =>
-        (el as HTMLElement).classList.toggle('active', (el as HTMLElement).dataset.orbit === this.moonOrbit));
-      focusPanel.querySelectorAll('[data-scale]').forEach((el) =>
-        (el as HTMLElement).classList.toggle('active', (el as HTMLElement).dataset.scale === this.scaleMode));
     }
+
+    // Quality UI, bottom sheet, interaction dimming.
+    this.syncQualityUI();
+    this.setupSheet();
+    this.setupInteractionDim();
+  }
+
+  /**
+   * While the user drags/pinches the scene, secondary chrome fades back so
+   * the 3D is the focus; it returns when they let go. The primary bar (the
+   * only always-visible controls on mobile) is intentionally left alone.
+   */
+  private setupInteractionDim(): void {
+    let restoreTimer: number | null = null;
+    this.controls.addEventListener('start', () => {
+      if (restoreTimer != null) { clearTimeout(restoreTimer); restoreTimer = null; }
+      document.body.classList.add('interacting');
+    });
+    this.controls.addEventListener('end', () => {
+      if (restoreTimer != null) clearTimeout(restoreTimer);
+      restoreTimer = window.setTimeout(() => {
+        restoreTimer = null;
+        document.body.classList.remove('interacting');
+      }, 900);
+    });
+  }
+
+  // ------------------------------------------------------------
+  // MOBILE SHEET (collapsed / half / full)
+  // ------------------------------------------------------------
+  private sheetEl: HTMLElement | null = null;
+  private sheetDrag = { y: 0, active: false, moved: false };
+  private sheetDragFrom = 0; // offset(px) the drag started from
+  private sheetState(): 'collapsed' | 'half' | 'full' {
+    return (this.sheetEl?.dataset.sheet as 'collapsed' | 'half' | 'full') || 'collapsed';
+  }
+
+  private setupSheet(): void {
+    this.sheetEl = document.getElementById('sheet');
+    const toggle = document.getElementById('sheet-toggle') as HTMLButtonElement | null;
+    const handle = document.getElementById('sheet-handle') as HTMLElement | null;
+    const close = document.getElementById('sheet-close') as HTMLButtonElement | null;
+    if (!this.sheetEl || !toggle) return;
+
+    toggle.addEventListener('click', () => {
+      const s = this.sheetState();
+      this.setSheetState(s === 'collapsed' ? 'half' : 'collapsed');
+    });
+    close?.addEventListener('click', () => this.setSheetState('collapsed'));
+    handle?.addEventListener('click', () => {
+      if (this.sheetDrag.moved) { this.sheetDrag.moved = false; return; } // a drag just ended
+      const s = this.sheetState();
+      this.setSheetState(s === 'collapsed' ? 'half' : s === 'half' ? 'full' : 'collapsed');
+    });
+
+    // Drag the handle to scrub between states (pointer events cover touch +
+    // mouse; the canvas behind never sees these because they start on the
+    // sheet, not the canvas).
+    const onDown = (e: PointerEvent): void => {
+      this.sheetDrag = { y: e.clientY, active: true, moved: false };
+      this.sheetEl!.style.transition = 'none';
+      this.sheetEl!.setPointerCapture(e.pointerId);
+      this.sheetDragFrom = this.sheetOffset(this.sheetState()); // px
+    };
+    const onMove = (e: PointerEvent): void => {
+      if (!this.sheetDrag.active) return;
+      const dy = e.clientY - this.sheetDrag.y;
+      if (Math.abs(dy) > 8) this.sheetDrag.moved = true;
+      // target offset: base + dy, clamped between full (0) and collapsed (max).
+      const from = this.sheetDragFrom;
+      const maxOff = this.sheetOffset('collapsed');
+      const target = Math.max(0, Math.min(from + dy, maxOff));
+      this.sheetEl!.style.transform = `translateY(${target}px)`;
+    };
+    const onUp = (e: PointerEvent): void => {
+      if (!this.sheetDrag.active) return;
+      this.sheetDrag.active = false;
+      try { this.sheetEl!.releasePointerCapture(e.pointerId); } catch { /* noop */ }
+      this.sheetEl!.style.transition = '';
+      const dy = e.clientY - this.sheetDrag.y;
+      const projected = this.sheetDragFrom + dy;
+      // Snap to whichever state's offset the projected position is closest to.
+      const states: Array<'collapsed' | 'half' | 'full'> = ['collapsed', 'half', 'full'];
+      let best = this.sheetState();
+      let bestD = Infinity;
+      for (const s of states) {
+        const d = Math.abs(this.sheetOffset(s) - projected);
+        if (d < bestD) { bestD = d; best = s; }
+      }
+      this.setSheetState(best);
+      this.sheetDrag.moved = true; // suppress the click that follows this drag
+    };
+    const sheet = this.sheetEl;
+    sheet.addEventListener('pointerdown', onDown);
+    sheet.addEventListener('pointermove', onMove);
+    sheet.addEventListener('pointerup', onUp);
+    sheet.addEventListener('pointercancel', onUp);
+    // Escape closes it (a11y parity with a dialog).
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') this.setSheetState('collapsed');
+    });
+    // Apply the JS-computed offset for the initial state so the peek matches
+    // the visualViewport-based math (not just the CSS dvh fallback), and so
+    // the toggle's aria-expanded / active class reflect reality on first paint.
+    this.setSheetState(this.sheetState());
+  }
+
+  /** translateY offset (px) for a sheet state — single source of truth. */
+  private sheetOffset(state: 'collapsed' | 'half' | 'full'): number {
+    const vh = window.visualViewport?.height ?? window.innerHeight;
+    if (state === 'full') return 0;
+    if (state === 'half') return vh * 0.52;
+    return vh - 76; // collapsed: a 76px peek (handle + title)
+  }
+
+  private setSheetState(state: 'collapsed' | 'half' | 'full'): void {
+    if (!this.sheetEl) return;
+    this.sheetEl.dataset.sheet = state;
+    this.sheetEl.style.transition = '';
+    this.sheetEl.style.transform = `translateY(${this.sheetOffset(state)}px)`;
+    const toggle = document.getElementById('sheet-toggle') as HTMLButtonElement | null;
+    if (toggle) {
+      const openish = state !== 'collapsed';
+      toggle.setAttribute('aria-expanded', String(openish));
+      toggle.classList.toggle('active', openish);
+    }
+  }
+
+  private collapseSheet(): void {
+    if (this.sheetEl && this.sheetState() !== 'collapsed') this.setSheetState('collapsed');
   }
 
   /**
    * Reflect `this.state` into the main UI toggle buttons. Every code path
    * that flips clouds/atmosphere/auto-rotate (main UI, debug panel, URL
    * params) must end here so the buttons never desync from the scene.
+   * Works on ALL instances of a control (both layouts share the same DOM).
    */
   private syncUIButtons(): void {
-    const controlsEl = document.getElementById('ui-controls');
-    if (!controlsEl) return;
     const sync = (action: string, on: boolean): void => {
-      const btn = controlsEl.querySelector(`[data-action="${action}"]`) as HTMLElement | null;
-      if (btn) btn.classList.toggle('active', on);
+      document.querySelectorAll(`[data-action="${action}"]`).forEach((el) => {
+        const h = el as HTMLElement;
+        h.classList.toggle('active', on);
+        h.setAttribute('aria-pressed', String(on));
+      });
     };
     sync('auto-rotate', this.state.autoRotate);
     sync('atmosphere', this.state.atmosphere);
@@ -1227,10 +1016,170 @@ export class EarthScene {
   }
 
   // ------------------------------------------------------------
+  // RUNTIME QUALITY SWITCHING
+  // ------------------------------------------------------------
+  /** Bumped on every tier change so in-flight texture loads can detect staleness. */
+  private qualityEpoch = 0;
+  /** Tier whose texture set actually produced the first-paint assets (mid-load changes). */
+  private loadedAtTier: QualityTier | null = null;
+
+  /** Public: set the quality setting (persisted) and apply it live. */
+  setQuality(setting: QualitySetting): void {
+    this.qualitySetting = setting;
+    try { localStorage.setItem('earth-quality', setting); } catch { /* private mode */ }
+    this.applyQuality();
+  }
+
+  /** Public (tests / debugging): the currently applied tier. */
+  getActiveTier(): QualityTier { return this.quality!.tier; }
+  /** Public (tests): the user setting, e.g. 'auto'. */
+  getQualitySetting(): QualitySetting { return this.qualitySetting; }
+  /** Public (tests): the active focus. */
+  getFocus(): Focus { return this.focus; }
+
+  /** Resolve the setting and push the profile through every cost lever. */
+  private applyQuality(): void {
+    const profile = resolveProfile(this.qualitySetting);
+    const prev = this.quality!;
+    if (profile.tier !== prev.tier) this.qualityEpoch++;
+    this.quality = profile;
+
+    this.applyQualityLevers(prev);
+
+    this.syncQualityUI();
+  }
+
+  /** The renderer-facing levers (pixel ratio, bloom, stars, segments, textures). */
+  private applyQualityLevers(prev?: QualityProfile): void {
+    const profile = this.quality!;
+    const from = prev ?? profile;
+
+    // 1) Pixel ratio — the single biggest fill-rate lever on 3x-DPR phones.
+    const pr = Math.min(window.devicePixelRatio, profile.pixelRatioCap);
+    this.renderer.setPixelRatio(pr);
+    if (this.composer) {
+      this.composer.setPixelRatio(pr);
+      this.composer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    // 2) Bloom + MSAA live on the composer render target: rebuild only when
+    //    the topology (bloom pass present / MSAA count) actually changes —
+    //    parameter-only changes apply in place.
+    const prevBloom = this.bloomPass != null;
+    const wantBloom = profile.bloom.enabled;
+    if (prevBloom !== wantBloom || from.msaaSamples !== profile.msaaSamples) {
+      this.composer = null;
+      this.bloomPass = null;
+      this.createComposer();
+    } else if (this.bloomPass) {
+      this.bloomPass.strength = profile.bloom.strength;
+      this.bloomPass.radius = profile.bloom.radius;
+      this.bloomPass.threshold = profile.bloom.threshold;
+    }
+
+    // 3) Corona — cheap uniform.
+    if (this.sunCorona) {
+      (this.sunCorona.material as THREE.SpriteMaterial).opacity = profile.coronaOpacity;
+    }
+
+    // 4) Star count — rebuild the point cloud (small buffer, cheap at runtime).
+    if (this.starField && this.starField.geometry.attributes.position.count !== profile.starCount) {
+      const parent = this.starField.parent;
+      const visible = this.starField.visible;
+      const order = this.starField.renderOrder;
+      const material = this.starField.material;
+      parent?.remove(this.starField);
+      this.starField.geometry.dispose();
+      this.starField = null;
+      const fresh = createStarField(this.scene, this.quality!.starCount);
+      fresh.material = material;
+      fresh.renderOrder = order;
+      fresh.visible = visible;
+      this.starField = fresh;
+    }
+
+    // 5) Sphere tessellation — swap geometries in place (skipped pre-first-paint
+    //    when the meshes don't exist yet — they were already built at this tier).
+    if (this.earthMesh) {
+      const seg = profile.sphereSegments;
+      this.swapGeometry(this.earthMesh, new THREE.SphereGeometry(1, seg.earth[0], seg.earth[1]));
+      this.swapGeometry(this.cloudMesh, new THREE.SphereGeometry(1.01, seg.cloud[0], seg.cloud[1]));
+      this.swapGeometry(this.atmosphereMesh, new THREE.SphereGeometry(1.08, seg.atmosphere[0], seg.atmosphere[1]));
+      this.swapGeometry(this.moonMesh, new THREE.SphereGeometry(MOON_RADIUS, seg.moon[0], seg.moon[1]));
+      if (this.sunMesh) this.swapGeometry(this.sunMesh, new THREE.SphereGeometry(SUN_RADIUS, seg.sun[0], seg.sun[1]));
+    }
+
+    // 6) Texture set — load the other set on demand, then swap into uniforms.
+    //    (Cached textures make the second switch instant.)
+    if (from.textureSet !== profile.textureSet && this.earthMaterial) {
+      void this.swapTextureSet(profile);
+    }
+  }
+
+  private swapGeometry(mesh: THREE.Mesh | null, next: THREE.BufferGeometry): void {
+    if (!mesh) return;
+    const old = mesh.geometry;
+    mesh.geometry = next;
+    old.dispose();
+  }
+
+  /** Load the new tier's texture set and swap it into every consumer. */
+  private async swapTextureSet(profile: QualityProfile): Promise<void> {
+    const epoch = this.qualityEpoch;
+    const loader = new THREE.TextureLoader();
+    loader.setCrossOrigin('anonymous');
+    try {
+      const [day, night, clouds, moon, sun] = await Promise.all([
+        this.loadTextureKey(loader, 'day'),
+        this.loadTextureKey(loader, 'night'),
+        this.loadTextureKey(loader, 'clouds').catch(() => null),
+        this.loadTextureKey(loader, 'moon').catch(() => null),
+        this.loadTextureKey(loader, 'sun').catch(() => null),
+      ]);
+      if (this.disposed || epoch !== this.qualityEpoch) return; // stale
+      if (this.earthMaterial) {
+        this.earthMaterial.uniforms.uDayTexture.value = day;
+        this.earthMaterial.uniforms.uNightTexture.value = night;
+      }
+      if (clouds) {
+        if (this.earthMaterial) this.earthMaterial.uniforms.uCloudTexture.value = clouds;
+        if (this.cloudMaterial) this.cloudMaterial.uniforms.uCloudTexture.value = clouds;
+      }
+      if (moon && this.moonMaterial) this.moonMaterial.uniforms.uTexture.value = moon;
+      if (sun && this.sunMaterial) {
+        this.sunMaterial.uniforms.uMap.value = sun;
+        this.sunMaterial.uniforms.uHasMap.value = 1.0;
+      }
+    } catch (err) {
+      console.warn('Quality texture swap failed; keeping previous set:', err);
+    }
+  }
+
+  /** Mirror the setting + active tier into the Quality buttons. */
+  private syncQualityUI(): void {
+    const activeTier = this.quality!.tier;
+    document.querySelectorAll('[data-quality]').forEach((el) => {
+      const h = el as HTMLElement;
+      const on = h.dataset.quality === this.qualitySetting;
+      h.classList.toggle('active', on);
+      h.setAttribute('aria-pressed', String(on));
+      // Publish the resolved tier on the Auto button so its tooltip can
+      // show exactly which profile the device is running right now.
+      if (h.dataset.quality === 'auto') h.dataset.tier = activeTier;
+      if (on && h.dataset.quality === 'auto') {
+        h.title = `Auto — rendering at ${activeTier}`;
+      } else {
+        h.removeAttribute('title');
+      }
+    });
+  }
+
+  // ------------------------------------------------------------
   // MOON — MESH, ORBIT, TIDAL LOCK
   // ------------------------------------------------------------
   private createMoon(loader: THREE.TextureLoader): void {
-    const geometry = new THREE.SphereGeometry(MOON_RADIUS, 96, 48);
+    const mseg = this.quality!.sphereSegments.moon;
+    const geometry = new THREE.SphereGeometry(MOON_RADIUS, mseg[0], mseg[1]);
 
     // Grey placeholder so the Moon (and its exact 0.2727 scale) exists in
     // the first frame; the real lunar map swaps in when it lands — the same
@@ -1261,15 +1210,13 @@ export class EarthScene {
     this.updateMoonTransform();
     this.scene.add(this.moonMesh);
 
-    loader.loadAsync('/assets/moon/moon-day-2k.jpg')
+    this.trackAsset('Moon · lunar map', this.loadTextureKey(loader, 'moon'))
       .then((tex) => {
         if (this.disposed) {
           // Scene went away while loading — don't leak the texture.
           tex.dispose();
           return;
         }
-        tex.colorSpace = THREE.SRGBColorSpace;
-        this.textures.push(tex);
         if (this.moonMaterial) this.moonMaterial.uniforms.uTexture.value = tex;
       })
       .catch((err) => {
@@ -1320,10 +1267,36 @@ export class EarthScene {
     return out.copy(this._origin);
   }
 
+  /**
+   * Camera distance (from the target) at which a sphere of `radius` plus an
+   * optional extra half-span fits WITHOUT CROPPING in the CURRENT aspect.
+   *
+   * The vertical FOV is fixed (45°) but the horizontal half-angle shrinks as
+   * the aspect gets narrow — exactly the portrait-phone case where the old
+   * vertical-only math let the limb (or the Moon) run off the screen edges:
+   *   tan(hfov/2) = tan(vfov/2) × aspect
+   * so we fit against the tighter of the two axes and take the max distance.
+   */
+  private fitDistance(radius: number, extraHalfSpan = 0, margin = 1.0): number {
+    const span = radius + extraHalfSpan;
+    const vTan = Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2));
+    const hTan = vTan * this.camera.aspect;
+    if (vTan <= 0 || hTan <= 0) return radius * 2.4;
+    return (Math.max(span / vTan, span / hTan)) * margin;
+  }
+
   private computeFocusPose(focus: Focus): CameraPose {
     if (focus === 'earth') {
+      const dir = this.initialCameraPosition.clone().normalize();
+      // Keep the globe (and its 1.08 atmosphere shell) fully in frame even on
+      // narrow portrait screens; 3.2 is just the desktop minimum, never a
+      // ceiling on how far we may pull back.
+      const dist = Math.max(
+        this.initialCameraPosition.length(),
+        this.fitDistance(1.08, 0, 1.06),
+      );
       return {
-        position: this.initialCameraPosition.clone(),
+        position: dir.multiplyScalar(dist),
         target: this._origin.clone(),
         minDistance: 1.3,
         maxDistance: 8,
@@ -1334,8 +1307,11 @@ export class EarthScene {
       const dir = this._v.copy(this.camera.position).sub(target);
       if (dir.lengthSq() < 1e-8) dir.set(0, 0.25, 1);
       dir.normalize();
+      // 1.4 is the desktop minimum; narrow screens pull back until the whole
+      // lunar disk fits horizontally as well as vertically.
+      const dist = Math.max(1.4, this.fitDistance(MOON_RADIUS, 0, 1.25));
       return {
-        position: target.clone().addScaledVector(dir, 1.4),
+        position: target.clone().addScaledVector(dir, dist),
         target,
         // Stay above the surface with room for the map to resolve.
         minDistance: MOON_RADIUS * 1.6,
@@ -1347,20 +1323,21 @@ export class EarthScene {
       const dir = this._v.copy(this.camera.position).sub(target);
       if (dir.lengthSq() < 1e-8) dir.set(0, 0.25, 1);
       dir.normalize();
+      // ~3.5 disk radii on desktop; pull back so the full corona halo (2.75
+      // radii) stays in frame on narrow aspects.
+      const dist = Math.max(SUN_RADIUS * 3.5, this.fitDistance(SUN_RADIUS * 2.75, 0, 1.05));
       return {
-        // Approach from ~3.5 disk radii: an impressive close-up with the
-        // full corona halo in frame.
-        position: target.clone().addScaledVector(dir, SUN_RADIUS * 3.5),
+        position: target.clone().addScaledVector(dir, dist),
         target,
         minDistance: SUN_RADIUS * 2.2, // never clip inside the photosphere
         maxDistance: SUN_DISTANCE * 1.2, // pull back until Earth fits too
       };
     }
-    // system: pull back until BOTH bodies fit in the vertical FOV.
+    // system: pull back until BOTH bodies fit — in the vertical AND the
+    // horizontal FOV (portrait phones are usually the binding axis).
     const target = this.moonPosition.clone().multiplyScalar(0.5);
     const halfSpan = this.orbitRadius() * 0.5 + MOON_RADIUS;
-    const fitDist = halfSpan / Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2));
-    const dist = fitDist * 1.4 + MOON_RADIUS;
+    const dist = Math.max(this.fitDistance(halfSpan, 0, 1.15) + MOON_RADIUS, 2);
     const dir = this._v.copy(this.camera.position).sub(target);
     if (dir.lengthSq() < 1e-8) dir.set(0, 0.25, 1);
     dir.normalize();
@@ -1370,6 +1347,27 @@ export class EarthScene {
       minDistance: 2,
       maxDistance: dist * 2.5,
     };
+  }
+
+  /**
+   * Post-orientation-change safety net: if the current view no longer contains
+   * the focused body (narrow axis cropped it), glide out to a framing that
+   * does. Never pulls the camera closer and never fights an in-flight
+   * transition — a deliberate zoom-in by the user is respected.
+   */
+  private reframeIfOutOfFrame(): void {
+    if (this.resetAnimId != null || this.disposed) return;
+    const focus = this.focus;
+    const target = this.focusCenter(this._v);
+    const cameraDist = this.camera.position.distanceTo(target);
+    const margin = 1.08;
+    let required = 0;
+    if (focus === 'earth') required = this.fitDistance(1.08, 0, margin);
+    else if (focus === 'moon') required = this.fitDistance(MOON_RADIUS, 0, margin * 1.1);
+    else if (focus === 'sun') required = this.fitDistance(SUN_RADIUS * 2.75, 0, margin * 1.05);
+    else required = this.fitDistance(this.orbitRadius() * 0.5 + MOON_RADIUS, 0, margin * 1.1);
+    if (cameraDist >= required) return; // already framed — user's orbit stays put
+    this.animateCameraTo(this.computeFocusPose(focus), 550);
   }
 
   /**
@@ -1383,7 +1381,7 @@ export class EarthScene {
    */
   private animateCameraTo(pose: CameraPose, durationMs = 900): void {
     if (this.resetAnimId != null) cancelAnimationFrame(this.resetAnimId);
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) durationMs = 0;
+    if (prefersReducedMotion()) durationMs = 0;
     const startPos = this.camera.position.clone();
     const startTarget = this.controls.target.clone();
     const startMin = this.controls.minDistance;
@@ -1419,8 +1417,11 @@ export class EarthScene {
   }
 
   private syncFocusUI(): void {
-    document.querySelectorAll('#focus-panel [data-focus]').forEach((el) =>
-      (el as HTMLElement).classList.toggle('active', (el as HTMLElement).dataset.focus === this.focus));
+    document.querySelectorAll('[data-focus]').forEach((el) => {
+      const h = el as HTMLElement;
+      h.classList.toggle('active', h.dataset.focus === this.focus);
+      h.setAttribute('aria-pressed', String(h.dataset.focus === this.focus));
+    });
   }
 
   /**
@@ -1443,16 +1444,22 @@ export class EarthScene {
 
   private setMoonOrbit(mode: MoonOrbitMode): void {
     this.moonOrbit = mode;
-    document.querySelectorAll('#focus-panel [data-orbit]').forEach((el) =>
-      (el as HTMLElement).classList.toggle('active', (el as HTMLElement).dataset.orbit === mode));
+    document.querySelectorAll('[data-orbit]').forEach((el) => {
+      const h = el as HTMLElement;
+      h.classList.toggle('active', h.dataset.orbit === mode);
+      h.setAttribute('aria-pressed', String(h.dataset.orbit === mode));
+    });
   }
 
   private setScaleMode(mode: ScaleMode): void {
     if (mode === this.scaleMode) return;
     this.scaleMode = mode;
     this.updateMoonTransform();
-    document.querySelectorAll('#focus-panel [data-scale]').forEach((el) =>
-      (el as HTMLElement).classList.toggle('active', (el as HTMLElement).dataset.scale === mode));
+    document.querySelectorAll('[data-scale]').forEach((el) => {
+      const h = el as HTMLElement;
+      h.classList.toggle('active', h.dataset.scale === mode);
+      h.setAttribute('aria-pressed', String(h.dataset.scale === mode));
+    });
     // The system span changed — re-frame if we are looking at it.
     if (this.focus !== 'earth' && this.moonMesh) {
       this.animateCameraTo(this.computeFocusPose(this.focus));
@@ -1483,17 +1490,55 @@ export class EarthScene {
         -(e.clientY / window.innerHeight) * 2 + 1,
       );
       this.raycaster.setFromCamera(ndc, this.camera);
-      const meshes: THREE.Mesh[] = [];
-      if (this.moonMesh) meshes.push(this.moonMesh);
-      if (this.earthMesh) meshes.push(this.earthMesh);
-      if (this.sunMesh) meshes.push(this.sunMesh);
+      // Pick against the ENLARGED invisible hit proxies, not the visual
+      // meshes: at System distance the Moon is a sliver that is impossible to
+      // finger-tap, so every body carries a comfortably oversized pick area
+      // (material-invisible, raycast-visible).
+      const meshes = this.hitProxies.filter((p) => p.mesh.visible).map((p) => p.mesh);
       const hits = this.raycaster.intersectObjects(meshes, false);
       if (!hits.length) return;
-      const hit = hits[0].object;
-      if (hit === this.moonMesh) this.setFocus('moon');
-      else if (hit === this.earthMesh) this.setFocus('earth');
-      else if (hit === this.sunMesh) this.setFocus('sun');
+      const proxy = this.hitProxies.find((p) => p.mesh === hits[0].object);
+      if (proxy) this.setFocus(proxy.focus);
     });
+  }
+
+  /**
+   * Build the invisible, enlarged tap targets. Radii are generous on purpose
+   * (≥ ~2× the visual size, and large in absolute world units at the System
+   * distance) so a finger tap — not a pixel-perfect aim — lands the body.
+   * The Moon proxy tracks the Moon's live position every frame.
+   */
+  private createHitProxies(): void {
+    const material = new THREE.MeshBasicMaterial({ visible: false });
+    const make = (radius: number, focus: Focus): { mesh: THREE.Mesh; focus: Focus } => {
+      const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 12, 8), material);
+      mesh.visible = false; // updated by updateHitProxies(); raycast ignores visible
+      this.scene.add(mesh);
+      return { mesh, focus };
+    };
+    const earth = make(1.15, 'earth');
+    earth.mesh.position.set(0, 0, 0);
+    earth.mesh.visible = true;
+    this.hitProxies.push(earth);
+    const sun = make(SUN_RADIUS * 1.2, 'sun');
+    sun.mesh.visible = true; // position tracked by updateHitProxies()
+    this.hitProxies.push(sun);
+    const moon = make(0.5, 'moon');
+    this.hitProxies.push(moon);
+  }
+
+  /** Keep the moving proxies in lock-step with their bodies (per frame). */
+  private updateHitProxies(): void {
+    for (const p of this.hitProxies) {
+      if (p.focus === 'earth') p.mesh.visible = true;
+      else if (p.focus === 'sun') {
+        p.mesh.visible = true;
+        p.mesh.position.copy(this.sunWorldPos);
+      } else if (p.focus === 'moon') {
+        p.mesh.visible = this.moonMesh != null;
+        if (this.moonMesh) p.mesh.position.copy(this.moonPosition);
+      }
+    }
   }
 
   // ------------------------------------------------------------
@@ -1517,11 +1562,21 @@ export class EarthScene {
     el.style.transform = `translate(-50%, -170%) translate(${x}px, ${y}px)`;
   }
 
+  /** Hide on platforms without document fullscreen (e.g. iOS Safari). */
+  private static fullscreenSupported(): boolean {
+    const d = document.documentElement as HTMLElement & { webkitRequestFullscreen?: () => void };
+    return typeof d.requestFullscreen === 'function' || typeof d.webkitRequestFullscreen === 'function';
+  }
+
   private toggleFullscreen(): void {
-    if (!document.fullscreenElement) {
-      document.documentElement.requestFullscreen().catch(() => {});
+    const d = document.documentElement as HTMLElement & { webkitRequestFullscreen?: () => void };
+    const isFull = document.fullscreenElement != null || d.webkitRequestFullscreen != null && (document as unknown as { webkitFullscreenElement?: unknown }).webkitFullscreenElement != null;
+    if (!isFull) {
+      if (typeof d.requestFullscreen === 'function') d.requestFullscreen().catch(() => {});
+      else if (typeof d.webkitRequestFullscreen === 'function') d.webkitRequestFullscreen();
     } else {
-      document.exitFullscreen().catch(() => {});
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+      else (document as unknown as { webkitExitFullscreen?: () => void }).webkitExitFullscreen?.();
     }
   }
 
@@ -1910,6 +1965,37 @@ export class EarthScene {
     this.animationId = requestAnimationFrame(this.animate);
     const dt = this.clock.getDelta();
 
+    // Runtime FPS guard (Auto mode only): if the device can't sustain the
+    // current tier for a sustained window, step one tier down — never back up,
+    // to avoid oscillation. Skipped while the user is actively driving the
+    // camera (frame cost is not representative) and during load.
+    if (this.qualitySetting === 'auto' && !this.isInteracting) {
+      this.fpsGuard.acc += dt;
+      this.fpsGuard.frames++;
+      const now = performance.now();
+      if (now > this.fpsGuard.cooldownUntil && now - this.fpsGuard.lastEval > 3000 && this.fpsGuard.frames >= 90) {
+        // fpsGuard.acc accumulates clock.getDelta(), which is in *seconds*, so
+        // frames / acc is already frames-per-second (no ms conversion needed).
+        const fps = this.fpsGuard.frames / this.fpsGuard.acc;
+        this.fpsGuard.acc = 0;
+        this.fpsGuard.frames = 0;
+        this.fpsGuard.lastEval = now;
+        if (fps < 28) {
+          const lower = nextTierDown(this.quality!.tier);
+          if (lower) {
+            console.info(`[quality] auto: ${Math.round(fps)} fps — stepping down to ${lower}`);
+            const from = this.quality!;
+            this.quality = QUALITY_PROFILES[lower];
+            this.qualityEpoch++;
+            this.applyQualityLevers(from);
+            this.syncQualityUI(); // reflect the auto-drop in the Quality buttons
+            this.fpsGuard.cooldownUntil = now + 15000;
+            this.fpsGuard.appliedDowngrade++;
+          }
+        }
+      }
+    }
+
     if (this.state.autoRotate && !this.isInteracting) {
       if (this.earthMesh) this.earthMesh.rotation.y += 0.0001;
       // Clouds drift very slightly faster than the surface — a slow relative
@@ -1964,6 +2050,7 @@ export class EarthScene {
       this.sunMaterial.uniforms.uTime.value = this.clock.elapsedTime;
     }
     this.updateMoonLabel();
+    this.updateHitProxies();
 
     this.controls.update();
     // Composer path: the scene renders into a linear HDR target (opaque
@@ -1988,6 +2075,11 @@ export class EarthScene {
       this.interactionTimeout = null;
     }
     window.removeEventListener('resize', this.onResize);
+    window.removeEventListener('orientationchange', this.onOrientationChange);
+    window.removeEventListener('pageshow', this.onResize);
+    window.visualViewport?.removeEventListener('resize', this.onResize);
+    if (this.reframeTimer != null) clearTimeout(this.reframeTimer);
+    document.body.removeEventListener('click', this.uiHandler);
     // Cover Mesh, Points and Line (the sun-ray ArrowHelper contains a Line
     // whose geometry/material were previously skipped).
     this.scene.traverse((obj) => {
