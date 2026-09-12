@@ -10,13 +10,13 @@
 - `node scripts/lighting_math_test.mjs` — **124/124 checks pass**.
 - Findings below were checked against the installed `node_modules/three` source (r186), not memory.
 
-**Overall:** This is a well-organized, unusually well-commented codebase — single-source Sun state, allocation-free render loop, epoch-guarded async swaps, careful disposal, real (non-fake) asset fallbacks, and a headless math test for the lighting model. That said, the review found **two functional bugs**, one resource leak, and a batch of lower-severity items.
+**Overall:** This is a well-organized, unusually well-commented codebase — single-source Sun state, allocation-free render loop, epoch-guarded async swaps, careful disposal, real (non-fake) asset fallbacks, and a headless math test for the lighting model. The review found **two functional bugs**, one resource leak, and a batch of lower-severity items. **Status: H1 (fps-guard units) is fixed; H2, M1–M3, and the Low/nit items remain open.**
 
 ---
 
 ## High severity (functional bugs)
 
-### H1. Runtime FPS auto-downgrade can never trigger (unit error)
+### H1. ✅ RESOLVED — Runtime FPS auto-downgrade could never trigger (unit error)
 `src/earth/EarthScene.ts:2501`
 
 ```ts
@@ -27,7 +27,7 @@ const fps = (this.fpsGuard.frames / this.fpsGuard.acc) * 1000;
 
 Every other `dt` consumer in `animate()` (moon orbit, auto-Sun sweep, cloud drift) correctly treats `dt` as seconds — this one site is the outlier.
 
-**Fix:** `const fps = this.fpsGuard.frames / this.fpsGuard.acc;` — and add a headless unit test around the fps computation (it's the one piece of the quality system with no coverage).
+**Fix:** `const fps = this.fpsGuard.frames / this.fpsGuard.acc;` — **applied** in `EarthScene.ts` (see the `// fpsGuard.acc accumulates clock.getDelta()…` comment). Build re-verified (`npm run build` → exit 0). A headless unit test around the fps computation is still recommended (it's the one piece of the quality system with no coverage).
 
 ### H2. Saved / URL quality setting is not applied at startup
 `src/earth/EarthScene.ts:621` (constructor) vs `669-682` (`applyURLParams`)
@@ -141,7 +141,7 @@ Disposed: window resize/orientation/pageshow, body click, rAF chains, timers, GP
 
 ## Suggested order of fixes
 
-1. **H1** fps-guard units (one line + a test) — the advertised auto-degrade is currently never running.
+1. ~~**H1** fps-guard units (one line + a test)~~ — **done** (removed the `* 1000`; build re-verified).
 2. **H2** quality-setting resolution at startup (a few lines) — persisted/URL settings are currently ignored.
 3. **M1** composer teardown on rebuild (extract a shared helper).
 4. **M3** drop `apple gpu` from the weak-GPU regex (one line, big real-world effect on iOS).

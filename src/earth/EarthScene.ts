@@ -2498,7 +2498,9 @@ export class EarthScene {
       this.fpsGuard.frames++;
       const now = performance.now();
       if (now > this.fpsGuard.cooldownUntil && now - this.fpsGuard.lastEval > 3000 && this.fpsGuard.frames >= 90) {
-        const fps = (this.fpsGuard.frames / this.fpsGuard.acc) * 1000;
+        // fpsGuard.acc accumulates clock.getDelta(), which is in *seconds*, so
+        // frames / acc is already frames-per-second (no ms conversion needed).
+        const fps = this.fpsGuard.frames / this.fpsGuard.acc;
         this.fpsGuard.acc = 0;
         this.fpsGuard.frames = 0;
         this.fpsGuard.lastEval = now;
