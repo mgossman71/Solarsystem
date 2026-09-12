@@ -31,8 +31,12 @@ def check(name, ok, detail=""):
 if not os.path.exists(PATH):
     print(f"[FAIL] file missing at {PATH}")
     sys.exit(1)
-im = Image.open(PATH)
-im.load()
+try:
+    im = Image.open(PATH)
+    im.load()
+except Exception as exc:  # corrupt / unreadable image → clean FAIL, not a traceback
+    print(f"[FAIL] valid image — could not decode: {exc}")
+    sys.exit(1)
 check("valid image", True, f"{im.format} {im.size[0]}x{im.size[1]}")
 
 px = im.convert("RGB")
@@ -57,9 +61,12 @@ mx = max(vals)
 def channel_avg(chan):
     c = px.getchannel(chan)
     cstep = max(1, w // 256)
-    sv = sum(c.getpixel((x, y)) for x in range(0, w, cstep) for y in range(0, h, cstep))
-    n = (w // cstep) * (h // cstep)
-    return sv / n
+    # Collect the samples first so the divisor is the ACTUAL count. The range
+    # yields ceil(w/cstep) * ceil(h/cstep) samples, which the old floored
+    # (w // cstep) * (h // cstep) undercounted whenever w/h were not exact
+    # multiples of cstep — that inflated the averages and could flip the gate.
+    samples = [c.getpixel((x, y)) for x in range(0, w, cstep) for y in range(0, h, cstep)]
+    return sum(samples) / len(samples)
 
 
 nr, ng, nb = channel_avg("R"), channel_avg("G"), channel_avg("B")

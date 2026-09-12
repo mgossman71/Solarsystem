@@ -1,161 +1,112 @@
-# Code Review — Web-Earth (verification pass)
+# Code Review Results
 
-**Scope:** audit of commit `e38aad4` ("Address code review findings") against the original
-review, plus the two fixes that audit produced.
-**Branch:** `fix/code-review-findings`
-**Date:** 2026-09-11
-**Typecheck:** `npx tsc --noEmit` passes clean.
-**Runtime:** verified in a browser against `npm run dev` — no shader compile errors.
+Branch: `addSun` (commit `13fd958` — Add navigable textured Sun with bloom and point-source Moon lighting)
+Date: 2026-09-11
 
-## Summary
-
-The original review raised 8 numbered findings plus 10 smaller items. **16 of 18 were correctly
-fixed** by `e38aad4`. Two were deliberately deferred (both performance-only). The commit also
-introduced **one user-visible regression** and left **one internal inconsistency created by its
-own fix** — both are now fixed on top, in the working tree.
-
-The two fixes are small: `&deg;` moved back outside the Sun-readout spans, and the shader debug
-branches converted from early `return`s to an `if / else if / else` chain. The `EarthScene.ts`
-diff looks large (≈104 lines) but `git diff -w` shows the substantive change is 19 lines — the
-rest is the re-indent of the production block into the new `else`.
+Consolidated from two review passes. Ordered by severity.
 
 ---
 
-## Verified fixed
+## High
 
-| # | Finding | Evidence |
-|---|---|---|
-| 1 | `toneMapping` / `toneMappingExposure` dead | `#include <tonemapping_fragment>` / `<colorspace_fragment>` appended to all four fragment shaders. Confirmed these actually compile for a non-raw `ShaderMaterial`: three r186 emits `tonemapping_pars_fragment`, the `toneMapping()` function, `colorspace_pars_fragment` and `linearToOutputTexel` into `prefixFragment` in the **non-raw** branch (`three.module.js:6833` block, injections at `:6933-6941`). Confirmed again at runtime — no `THREE.WebGLProgram: Shader Error`. |
-| 2 | Cloud white-sphere branch unreachable | Reordered to `2.5 → 1.5 → 0.5`, matching the earth shader. `?mode=3` renders the white sphere. |
-| 3 | URL params desync the toggle buttons | New `syncUIButtons()`, called at the end of `setupUI()` (after `applyURLParams`) and from both debug-panel toggles. Verified: `?clouds=0&atmosphere=0&rotate=0` leaves all three buttons reading *off*, and clicking Clouds turns them *on* with `active` set — no longer inverted. |
-| 4 | `dispose()` leaks | Textures tracked in `this.textures` and disposed; `controls.dispose()` added; `traverse` now covers `THREE.Line` (the sun-ray `ArrowHelper`); `interactionTimeout` cleared. |
-| 5 | `resetView()` framerate-dependent / re-entrant | Now `performance.now()`-driven over a fixed 600 ms, single `resetAnimId` handle, cancelled by the OrbitControls `start` listener. |
-| 6 | Per-frame DOM work | Refs cached in `this.sunUI`; writes guarded by `lastAzShown` / `lastElShown` / `lastKnobTransform`. Both `setDirection(...clone())` allocations removed. |
-| 8 | `earth-topology.png` shipped unused | Deleted from `public/assets/earth/`. |
-| — | Error path destroyed the app | `dispose()` runs before an appended overlay `<div>`; no more `body.innerHTML` clobber. |
-| — | `dragging = true` before the guard | Assignment moved below the `fullDaylight` guard. |
-| — | Dead state / unused varying | `this.debugMode`, `state.softDaylight` and `vNormal` all removed. |
-| — | Duplicated Sun constants | Removed from `index.html`; the panel is populated from the TS constants on startup. |
-| — | `updateSunUI()` called twice | One call removed; the initialising call survives at `EarthScene.ts:973`. |
-| — | `?sun=az,el` not range-checked | Clamped via `THREE.MathUtils.clamp` to ±180 / ±90. |
-| — | Pinch-zoom blocked | `maximum-scale` / `user-scalable=no` dropped from the viewport meta. |
-| — | Implicit transparent draw order | Explicit `renderOrder` 0/0/1/2 on earth, stars, clouds, atmosphere. |
+### 1. Full Daylight + Sun focus is a divergent feedback loop
+`src/earth/EarthScene.ts:1538`
 
-### One false alarm, recorded so it isn't re-raised
+`updateFullDaylightSun()` sets `sun.direction = normalize(camera.position - controls.target)`, and `placeSun()` (animate, line 1917) then moves the Sun to `direction * 600`. When `focus === 'sun'`, `controls.target` is copied from `focusCenter()` = `sunWorldPos` every frame — so the target *is* the thing the direction is measured from.
 
-Swapping `setDirection(this._sunTmp.clone())` for `setDirection(this.sun.direction)` in
-`updateFullDaylightSun` **is safe**, despite `azimuth`/`elevation` being assigned directly rather
-than through `set()`. `this.sun.direction` is copied from `_sunTmp` four lines earlier
-(`EarthScene.ts:805`), so it is not stale.
+Repro: click "Sun", then "Full Daylight". Each frame the Sun teleports ~600 units to a new position, the target chases it, OrbitControls clamps the camera, and the view whips around indefinitely. The same class of problem hits Auto Sun with Sun focus (the Sun sweeps at ~100 units/s while the camera stays put) and any pad/slider/preset Sun move while focused on the Sun.
 
-The commit's comment justifying the change was wrong, though — it claimed "setDirection copies
-the vector into its geometry". `ArrowHelper.setDirection` derives a quaternion and retains no
-reference to the vector. Dropping the `clone()` is correct; the stated reason was not. Comment
-corrected.
+**Fix:** derive the Full Daylight direction from a fixed reference (e.g. Earth's centre) rather than `controls.target`, or suppress the coupling while `focus === 'sun'`.
 
 ---
 
-## Problems found in the commit — now fixed
+## Medium
 
-### A. The degree symbol disappeared from the Sun readout (regression)
+### 2. Focus transitions to/from the Sun snap instead of animating
+`src/earth/EarthScene.ts:1376`
 
-De-duplicating the hardcoded `150` / `18` moved `&deg;` *inside* the span:
+`animateCameraTo()` applies `controls.minDistance`/`maxDistance` immediately, before the 900 ms lerp, and each `step()` calls `controls.update()`, which clamps the camera radius into that range.
 
-```html
-<!-- as committed in e38aad4 -->
-<div>Azimuth&nbsp; <b><span id="sun-az-val">&deg;</span></b></div>
-```
+Repro: focus Sun (camera ends ~617 units from Earth), then click "Earth" — `maxDistance` becomes 8 on frame 1, so `update()` yanks the camera to within 8 units of Earth instantly and the cinematic fly-back is destroyed. The reverse (Earth → Sun, `minDistance` 11 while the camera is ~2.5 from the lerping target) produces a visible jolt at the start. This was harmless before because all poses shared a similar distance scale; the Sun pose is ~100× larger.
 
-`updateSunUI()` writes `ui.azVal.textContent = String(az)`, which replaces the span's entire
-contents — so the `°` was destroyed on the very first update and the panel read `150` / `18`
-with no unit, permanently. Before the commit the `&deg;` sat outside the span and survived.
+**Fix:** lerp the distance clamps alongside the camera, or apply them only once the transition completes.
 
-**Fixed** in `index.html:368-369` — span left empty, `&deg;` back outside it. The intent of the
-original change (no hardcoded values) is preserved.
+### 3. `dispose()` leaks bloom/output pass GPU resources
+`src/earth/EarthScene.ts:1986`
 
-Verified: reads `150°` / `18°` on load, and still `0°` after clicking the Sunset preset.
+`EffectComposer.dispose()` only frees its own two render targets and internal copy pass — it never calls `dispose()` on passes added via `addPass()`. `UnrealBloomPass` alone owns 11 `WebGLRenderTarget`s (bright + 5 horizontal + 5 vertical blur buffers) plus several materials and a full-screen quad; `OutputPass` owns its own material and quad. Neither is stored on `this` (the `bloom`/`outputPass` locals in `createComposer()` are discarded), so `dispose()` has no reference to free them.
 
-### B. Debug modes bypassed tone mapping (inconsistency created by fix #1)
+Every `EarthScene` create/dispose cycle — the "Failed to load Earth" error path, or re-instantiation via the `window.__earth` test hook — leaks 11+ GPU render targets and their textures/programs, eventually exhausting the browser's WebGL context and texture budget.
 
-In both the earth and cloud shaders, every `uDebugMode` branch ended in `return;` — placed
-*before* the two new includes at the end of `main()`. The production path was therefore
-ACES-tone-mapped and sRGB-encoded while the validation views stayed raw linear.
+**Fix:** store the passes on the instance and dispose them in `dispose()`.
 
-This partly defeated finding #2's purpose: the white-sphere harness exists to be compared against
-the real render, and it was left in a different color space than the thing it validates.
+### 4. Moving to the composer changed the blending space for every transparent layer
+`src/earth/EarthScene.ts:1066`
 
-**Fixed** — both shaders restructured to a single exit (`if / else if / else`, no early returns),
-with the includes after the chain. Branch ordering stays identical in the two shaders
-(`2.5 → 1.5 → 0.5`), which was the point of #2.
+Clouds (alpha), atmosphere (additive) and stars (additive) previously blended into an sRGB-encoded, already tone-mapped framebuffer. With `RenderPass` → HalfFloat target, their `tonemapping_fragment`/`colorspace_fragment` includes become no-ops and blending now happens in linear HDR, with ACES applied once at the end.
 
-Verified: `?mode=1`, `?mode=2` and `?mode=3` all render, with no shader compile errors.
+Consequence: additive star and atmosphere accumulation no longer matches the previous look (stars dim, atmosphere rim brightens). The claim that "Earth/Moon/clouds look exactly as before" does not hold.
 
----
+**Fix:** re-tune the star/atmosphere intensities against the new pipeline, or confirm the shift is the intended look and update the commit's claim.
 
-## Still open
+### 5. The 1.0 bloom threshold is not exclusive to the Sun
+`src/earth/EarthScene.ts:1078`
 
-### 7. 5 MB cloud PNG — not addressed
+With linear-HDR additive blending (see #4), the atmosphere rim added on top of the lit Earth limb, and the ocean specular highlight, can exceed 1.0 pre-tone-map.
 
-`public/assets/earth/earth-clouds.png` is still 5,033,486 bytes and still blocks first paint via
-`Promise.all`. Only `.a` is ever sampled, yet full RGB is shipped. Deferred by decision, not an
-oversight.
+Repro: sunset/day preset with the atmosphere on — the Earth's limb and the ocean glint bloom too, not just the Sun, which the inline comment explicitly assumes cannot happen.
 
-### 1 (follow-up). Shader constants were never re-tuned
-
-The original review warned that fixing the tone-mapping gap would visibly change the image and
-that the tuned constants were compensating for the missing encode. ACES + exposure 1.1 + sRGB
-encode are now live, but `uNightIntensity: 2.5` (`EarthScene.ts:541`), the
-`0.85 + 0.15 * sunFacing` day shade (`EarthScene.ts:93`) and the specular weights are unchanged.
-The render is plausible as it stands, but it is not the tuning anyone signed off on. Deferred by
-decision.
-
-### Housekeeping
-
-The `e38aad4` commit message body is corrupted: a repeated `- Clamp ?sun=az,el to` fragment, a
-`-----rd-----rd` run, and a stray `EOF` line. It has already merged to `main` via PR #1, so it is
-now permanent short of a history rewrite — recorded here rather than as an action item. Worth a
-glance at whatever produced it, since the garbling looks like a truncated heredoc rather than
-anything the author typed.
+**Fix:** raise the threshold, or isolate the Sun with a selective-bloom layer.
 
 ---
 
-## Not an issue
+## Low
 
-- No security concerns found.
-- The absolute `/assets/...` paths are correct for the nginx-at-root deployment in the
-  `Dockerfile` — they would only break under a sub-path.
-- The cloud-shadow UV sign convention is correct (verified against `SphereGeometry`'s φ mapping
-  and Y-rotation direction).
-- Cloud shell radius (1.01) clears the earth mesh's facet dip at its tessellation — no z-fighting.
-- `onMove` / `setFromPointer` still lack their own `fullDaylight` guard, but `dragging` can no
-  longer be set in Full Daylight, so the path is unreachable. Only enabling Full Daylight
-  *mid-drag* could still fight — narrow enough to leave.
+### 6. `composer.setPixelRatio()` is called before `setSize()` with a device-pixel width
+`src/earth/EarthScene.ts:1870`
 
----
+`EffectComposer` sets `_width = renderTarget.width` when a render target is supplied — i.e. `innerWidth * pixelRatio` (2560), not logical pixels. `setPixelRatio()` internally calls `setSize(_width, _height)`, resizing the targets to `2560 * 2 = 5120`. The following explicit `setSize(w, h)` corrects it before any render, so it is currently benign, but the composer's `_width`/`_height` are wrong from construction and any future path that resizes without that explicit call will allocate 4× the intended buffers.
 
-## Update — 2026-09-11 (post-review)
+**Fix:** call `setSize()` before `setPixelRatio()`, or drop the redundant `setPixelRatio()` call.
 
-### 7. 5 MB cloud PNG — now fixed
+### 7. The `logdepthbuf` includes are dead code
+`src/earth/EarthScene.ts:19` (renderer at `:673`)
 
-- **Recompressed** `earth-clouds.png`: 5,033,486 → 942,463 bytes (81% smaller). The file was
-  already a white+alpha palette and both shaders sample only `.a`, so the new 2048x1024
-  palette PNG carries the same information. Visible coverage is preserved (alpha p75 = 42,
-  p90 = 136 in both; fraction of pixels above the shader's 0.25 knee: 0.1941 vs 0.1950 for
-  the downsampled original). Pixels with alpha ≤ 25 are zeroed — mathematically invisible
-  in the current shader (`smoothstep(0.10, 0.85, d)` is 0 there in the cloud shell and in
-  the surface shadow), so the rendered output is unchanged apart from slightly softer
-  downscale edges. Original preserved in git history.
-- **Cloud load no longer blocks first paint**: `loadEarth()` now awaits only day/night;
-  both cloud consumers start on a 1x1 transparent placeholder (pixel-identical to
-  "no clouds", since only `.a` is read) and the map swaps in when it arrives. A cloud 404
-  now degrades to a cloudless Earth (console warning) instead of tearing the app down via
-  the `loadEarth().catch()` path. `disposed` flag prevents a post-dispose load from
-  leaking the texture.
-- Verified: `tsc --noEmit` clean, `npm run build` passes, dev server serves the page and
-  all three textures (cloud asset byte-identical to the source file).
+`createRenderer()` does not pass `logarithmicDepthBuffer: true`, so `USE_LOGDEPTHBUF` is never defined and both `#include <logdepthbuf_pars_vertex>` and `#include <logdepthbuf_vertex>` compile to nothing. There are also no fragment-side counterparts in `earthFragmentShader`, and the cloud/atmosphere/moon/star/sun shaders have no includes at all — so if anyone enables the flag to deal with the new far plane (widened 1200 → 2400 for the Sun), depth output would be inconsistent across layers.
 
-### 1 (follow-up). Shader constants re-tune — still deferred
+**Fix:** either enable the flag and add includes to every custom shader (vertex *and* fragment), or remove the dead includes.
 
-Left as-is: it is a visual sign-off call ("the render is plausible as it stands") and was
-deferred by decision. No automated browser was available for a before/after pass, so no
-numbers were changed.
+### 8. The Sun's apparent size is ~2× the stated value
+`src/earth/EarthScene.ts:446`
+
+`2 * atan(5 / 600) = 0.955°`, not the 0.5° the comment claims in order to match the real Sun's 0.53°. The constant looks to have been derived from `atan()` without the factor of two; matching 0.53° at distance 600 needs `SUN_RADIUS ≈ 2.8`.
+
+**Fix:** correct the constant or the comment, depending on which is intended.
+
+### 9. Stale comment contradicts the new point-source Moon lighting
+`src/earth/EarthScene.ts:292`
+
+The header comment (lines 292–295) still states the Moon "shares the SAME Sun direction uniform as Earth … so lunar phase geometry is exactly consistent with the Earth lighting." The code now wires the Moon's `uSunDirection` to `this.moonSunDir` (line 1241), a distinct per-frame vector computed via `sunDirectionToward(sunWorldPos, moonPosition, …)`.
+
+**Fix:** update the comment to describe the point-source derivation.
+
+### 10. `channel_avg` divides by the wrong sample count
+`scripts/verify_sun_texture.py:61`
+
+The loops iterate `range(0, w, cstep)` × `range(0, h, cstep)`, yielding `ceil(w/cstep) * ceil(h/cstep)` samples, but `n = (w // cstep) * (h // cstep)` floors. For any image whose dimensions are not exact multiples of `cstep`, the averages come out inflated — which can flip the `nr > 200` gate and pass a texture it should reject.
+
+Also minor: a corrupt JPEG makes `Image.open`/`load` raise an unhandled traceback instead of printing a FAIL.
+
+### 11. Duplicated Sun world-position math
+`src/earth/EarthScene.ts:1027`
+
+`sunWorldPositionFromAzEl(az, el, distance, out)` was added to `SunLighting.ts` and imported here, but `placeSun()` instead computes `this.sunWorldPos.copy(this.sun.direction).multiplyScalar(SUN_DISTANCE)` inline. Functionally equivalent, but two copies of the same math must be kept in sync by hand. `sunDirectionFromAzEl` and `sunWorldPositionFromAzEl` are both unused imports in this file.
+
+**Fix:** call the helper, or drop the unused imports.
+
+### 12. Unreachable direct-render fallback in `animate()`
+`src/earth/EarthScene.ts:1946`
+
+`createComposer()` is called unconditionally in `init()`, so `this.composer` is always truthy and the `else { this.renderer.render(…) }` branch can never execute. It reads as a supported no-post-processing path but is untested dead code.
+
+**Fix:** remove the branch, or make composer creation genuinely conditional (e.g. a fallback when post-processing is unsupported).

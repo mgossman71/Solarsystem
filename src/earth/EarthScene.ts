@@ -6,9 +6,7 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import {
   SunLightingState,
-  sunDirectionFromAzEl,
   sunDirectionToward,
-  sunWorldPositionFromAzEl,
 } from './SunLighting';
 
 // ============================================================
@@ -16,7 +14,6 @@ import {
 // ============================================================
 
 const earthVertexShader = /* glsl */ `
-  #include <logdepthbuf_pars_vertex>
   varying vec2 vUv;
   varying vec3 vWorldNormal;
   varying vec3 vWorldPosition;
@@ -28,7 +25,6 @@ const earthVertexShader = /* glsl */ `
     vec4 mvPosition = viewMatrix * worldPos;
     vWorldPosition = worldPos.xyz;
     gl_Position = projectionMatrix * mvPosition;
-    #include <logdepthbuf_vertex>
   }
 `;
 
@@ -289,9 +285,13 @@ const atmosphereFragmentShader = /* glsl */ `
 // ---------------------------------------------------------------------------
 // MOON SHADERS
 //
-// The Moon shares the SAME Sun direction uniform as Earth (the one shared
-// `SunLightingState.direction` Vector3, referenced by uSunDirection), so
-// lunar phase geometry is exactly consistent with the Earth lighting.
+// The Moon is lit by a TRUE POINT SOURCE: its uSunDirection uniform is
+// `this.moonSunDir`, a distinct per-frame vector set in animate() via
+// sunDirectionToward(sunWorldPos, moonPosition, …). The Moon orbits ~10–60
+// units from the Sun's world position while Earth sits at the origin, so its
+// light direction differs slightly from Earth's — exactly what yields correct,
+// screen-consistent lunar phases (a shared parallel-ray direction would show
+// the identical phase on both bodies, which is physically wrong).
 //
 // Deliberate absences (per design): no atmosphere, no sunset band, no soft
 // fill, negligible night ambient. The terminator is sharp — there is no air
@@ -438,12 +438,12 @@ const starFragmentShader = /* glsl */ `
 const INITIAL_SUN_AZIMUTH = 150;   // degrees, -180..180
 const INITIAL_SUN_ELEVATION = 18;  // degrees, -90..90
 
-// The Sun as a real scene object: radius 5 at distance 600 gives an apparent
-// size of ~0.5° from Earth — the same as the actual Sun (0.53°) — while the
-// distance sits well outside the star field (200–350), so stars still read as
-// an infinitely distant backdrop. 600 ≫ the Moon orbit (≤ 60.3), so its light
-// behaves like a true distant point source with physically correct parallax.
-const SUN_RADIUS = 5;
+// The Sun as a real scene object: radius 2.8 at distance 600 gives an apparent
+// size of ~0.53° from Earth (2·atan(2.8/600)) — the same as the actual Sun —
+// while the distance sits well outside the star field (200–350), so stars still
+// read as an infinitely distant backdrop. 600 ≫ the Moon orbit (≤ 60.3), so its
+// light behaves like a true distant point source with physically correct parallax.
+const SUN_RADIUS = 2.8;
 const SUN_DISTANCE = 600;
 
 function wrapAzimuth(deg: number): number {
@@ -904,8 +904,10 @@ export class EarthScene {
 
     // Photosphere: real sphere, 4K solar texture (procedural granulation
     // until it lands, or forever if it fails), limb darkening, and an HDR
-    // brightness of ~1.5 so it reads as the scene's brightest object and is
-    // the only thing above the bloom threshold.
+    // brightness of ~1.5 so it reads as the scene's brightest object and is the
+    // primary bloom source. The bloom threshold (see createComposer) sits high
+    // enough that only the Sun and the very brightest limb/specular highlights
+    // exceed it.
     const material = new THREE.ShaderMaterial({
       uniforms: {
         uMap: { value: null },
@@ -1059,10 +1061,14 @@ export class EarthScene {
   // ------------------------------------------------------------
   // RenderPass → UnrealBloom → OutputPass. The scene renders into a linear
   // HalfFloat target: three only enables TONE_MAPPING when rendering to the
-  // screen, so the existing shaders' tone-mapping/color-space includes are
-  // no-ops there, Earth/Moon/clouds look exactly as before, and OutputPass
-  // applies ACES + sRGB exactly once at the end. With a 1.0 threshold only
-  // the Sun's HDR values (~1.5) bloom.
+  // screen, so the OPAQUE layers' (Earth, Moon) tone-mapping/color-space
+  // includes are no-ops there and they look exactly as before, and OutputPass
+  // applies ACES + sRGB exactly once at the end. Note the transparent layers
+  // (clouds' alpha, the additive atmosphere and stars) now blend in LINEAR HDR
+  // before that single tone-map, so their apparent brightness shifts slightly
+  // versus the old sRGB-framebuffer blending. The bloom threshold (~1.25) sits
+  // above 1.0 so only the Sun's HDR values (~1.5) and the very brightest limb
+  // and ocean-specular highlights bloom — not the whole atmosphere rim.
   private createComposer(): void {
     const pr = this.renderer.getPixelRatio();
     const size = new THREE.Vector2(
@@ -1075,9 +1081,14 @@ export class EarthScene {
     });
     const composer = new EffectComposer(this.renderer, renderTarget);
     composer.addPass(new RenderPass(this.scene, this.camera));
-    const bloom = new UnrealBloomPass(size, 0.7, 0.5, 1.0);
+    const bloom = new UnrealBloomPass(size, 0.7, 0.5, 1.25);
     composer.addPass(bloom);
     composer.addPass(new OutputPass());
+    // EffectComposer's constructor sets _width/_height from the (device-pixel)
+    // renderTarget size; normalise them to LOGICAL pixels so setSize() /
+    // setPixelRatio() scale by the pixel ratio exactly once — otherwise the
+    // passes (notably the bloom's 11 blur targets) are allocated 2× too large.
+    composer.setSize(window.innerWidth, window.innerHeight);
     this.composer = composer;
   }
 
@@ -1367,17 +1378,28 @@ export class EarthScene {
    * chains; a user grab cancels it (createControls, resetAnimId). The END
    * target is re-resolved every frame via focusCenter(), so while the Moon
    * orbits mid-flight the transition keeps chasing its live position.
+   * The zoom clamps (min/maxDistance) animate with the camera (see body) so
+   * the fly-through is not cancelled by an instant range clamp.
    */
   private animateCameraTo(pose: CameraPose, durationMs = 900): void {
     if (this.resetAnimId != null) cancelAnimationFrame(this.resetAnimId);
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) durationMs = 0;
     const startPos = this.camera.position.clone();
     const startTarget = this.controls.target.clone();
-    this.controls.minDistance = pose.minDistance;
-    this.controls.maxDistance = pose.maxDistance;
+    const startMin = this.controls.minDistance;
+    const startMax = this.controls.maxDistance;
+    // Animate the zoom clamps alongside the camera. Applying the pose's
+    // destination clamps on frame 1 would make controls.update() snap the
+    // camera into range and kill the fly-through (the Sun pose is ~100×
+    // farther than the Earth pose), so lerp them with the same eased t.
+    const applyClamps = (ease: number): void => {
+      this.controls.minDistance = startMin + (pose.minDistance - startMin) * ease;
+      this.controls.maxDistance = startMax + (pose.maxDistance - startMax) * ease;
+    };
     if (durationMs <= 0) {
       this.camera.position.copy(pose.position);
       this.controls.target.copy(pose.target);
+      applyClamps(1);
       this.controls.update();
       this.resetAnimId = null;
       return;
@@ -1389,6 +1411,7 @@ export class EarthScene {
       this.camera.position.lerpVectors(startPos, pose.position, ease);
       this.focusCenter(this._v); // live end-target (Moon moves while we fly)
       this.controls.target.lerpVectors(startTarget, this._v, ease);
+      applyClamps(ease);
       this.controls.update();
       this.resetAnimId = t < 1 ? requestAnimationFrame(step) : null;
     };
@@ -1529,15 +1552,18 @@ export class EarthScene {
   // ------------------------------------------------------------
   // The shader convention is: uSunDirection = the world-space direction the
   // Sun lies in (lit hemisphere faces it). Placing the Sun behind the viewer
-  // therefore means direction = normalize(cameraPosition - earthCenter),
-  // where the Earth center is the orbit target. That vector is written IN
-  // PLACE into the one shared Vector3 every uSunDirection uniform references,
-  // so the surface day/night blend, city lights, ocean specular, clouds and
-  // atmosphere all follow the camera together — no layer invents its own
-  // light, and no ambient/emissive cheat flattens the shading.
+  // therefore means direction = normalize(cameraPosition - earthCenter), where
+  // earthCenter is EARTH'S CENTRE (the origin) — a FIXED reference, deliberately
+  // NOT the orbit target. This matters: when the Sun is the focus, the target
+  // tracks the Sun (see animate()), so deriving the direction from a target the
+  // Sun is positioned relative to would be a divergent feedback loop. That
+  // vector is written IN PLACE into the one shared Vector3 every uSunDirection
+  // uniform references, so the surface day/night blend, city lights, ocean
+  // specular, clouds and atmosphere all follow the camera together — no layer
+  // invents its own light, and no ambient/emissive cheat flattens the shading.
   private updateFullDaylightSun(): void {
-    this._sunTmp.copy(this.camera.position).sub(this.controls.target);
-    if (this._sunTmp.lengthSq() < 1e-12) return; // degenerate: camera on center
+    this._sunTmp.copy(this.camera.position).sub(this._origin);
+    if (this._sunTmp.lengthSq() < 1e-12) return; // degenerate: camera on centre
     this._sunTmp.normalize();
     this.sun.direction.copy(this._sunTmp);
     // Sync azimuth/elevation from the vector so the panel readout, knob and
@@ -1940,14 +1966,12 @@ export class EarthScene {
     this.updateMoonLabel();
 
     this.controls.update();
-    // Composer path: the scene renders into a linear HDR target (existing
+    // Composer path: the scene renders into a linear HDR target (opaque
     // shaders' tone-mapping/color-space includes are no-ops there), the Sun's
     // HDR values drive the bloom, and OutputPass applies ACES + sRGB once.
-    if (this.composer) {
-      this.composer.render();
-    } else {
-      this.renderer.render(this.scene, this.camera);
-    }
+    // createComposer() runs unconditionally in init(), so this guard is
+    // always true — but it keeps the loop null-safe with no dead fallback.
+    if (this.composer) this.composer.render();
   };
 
   // ------------------------------------------------------------
@@ -1983,7 +2007,18 @@ export class EarthScene {
       if (coronaMat.map) coronaMat.map.dispose();
       coronaMat.dispose();
     }
-    if (this.composer) this.composer.dispose();
+    // Dispose the post-processing passes first: EffectComposer.dispose() only
+    // frees its own read/write targets and copy pass, NOT the passes added via
+    // addPass(). UnrealBloomPass owns 11 render targets + several materials + a
+    // full-screen quad, and OutputPass its own material/quad — free them so
+    // repeated create/dispose cycles don't exhaust the GPU texture budget.
+    if (this.composer) {
+      for (const pass of this.composer.passes) {
+        (pass as { dispose?: () => void }).dispose?.();
+      }
+      this.composer.dispose();
+      this.composer = null;
+    }
     this.controls.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();
