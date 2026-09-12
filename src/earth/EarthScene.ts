@@ -1,12 +1,22 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { SunLightingState } from './SunLighting';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import {
+  SunLightingState,
+  sunDirectionFromAzEl,
+  sunDirectionToward,
+  sunWorldPositionFromAzEl,
+} from './SunLighting';
 
 // ============================================================
 // SHADERS
 // ============================================================
 
 const earthVertexShader = /* glsl */ `
+  #include <logdepthbuf_pars_vertex>
   varying vec2 vUv;
   varying vec3 vWorldNormal;
   varying vec3 vWorldPosition;
@@ -15,8 +25,10 @@ const earthVertexShader = /* glsl */ `
     vUv = uv;
     vWorldNormal = normalize(mat3(modelMatrix) * normal);
     vec4 worldPos = modelMatrix * vec4(position, 1.0);
+    vec4 mvPosition = viewMatrix * worldPos;
     vWorldPosition = worldPos.xyz;
-    gl_Position = projectionMatrix * viewMatrix * worldPos;
+    gl_Position = projectionMatrix * mvPosition;
+    #include <logdepthbuf_vertex>
   }
 `;
 
@@ -426,6 +438,14 @@ const starFragmentShader = /* glsl */ `
 const INITIAL_SUN_AZIMUTH = 150;   // degrees, -180..180
 const INITIAL_SUN_ELEVATION = 18;  // degrees, -90..90
 
+// The Sun as a real scene object: radius 5 at distance 600 gives an apparent
+// size of ~0.5° from Earth — the same as the actual Sun (0.53°) — while the
+// distance sits well outside the star field (200–350), so stars still read as
+// an infinitely distant backdrop. 600 ≫ the Moon orbit (≤ 60.3), so its light
+// behaves like a true distant point source with physically correct parallax.
+const SUN_RADIUS = 5;
+const SUN_DISTANCE = 600;
+
 function wrapAzimuth(deg: number): number {
   return ((deg + 180) % 360 + 360) % 360 - 180;
 }
@@ -441,7 +461,7 @@ const INITIAL_MOON_ANGLE = (-60 * Math.PI) / 180;       // starts right of Earth
 const MOON_ORBIT_PERIOD_VISUAL = 60;           // seconds per orbit, "Visualized" mode
 const MOON_ORBIT_PERIOD_REALTIME = 27.32 * 24 * 3600;   // sidereal month, seconds
 
-type Focus = 'earth' | 'moon' | 'system';
+type Focus = 'earth' | 'moon' | 'sun' | 'system';
 type MoonOrbitMode = 'paused' | 'visualized' | 'realtime';
 type ScaleMode = 'explore' | 'real';
 
@@ -460,6 +480,7 @@ interface CameraPose {
 export class EarthScene {
   private container: HTMLElement;
   private renderer: THREE.WebGLRenderer;
+  private composer: EffectComposer | null = null;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
   private controls: OrbitControls;
@@ -477,6 +498,19 @@ export class EarthScene {
   // atmosphere uSunDirection uniforms — moving the Sun updates every lighting
   // system at once, so the layers can never visually disagree.
   private sun = new SunLightingState(INITIAL_SUN_AZIMUTH, INITIAL_SUN_ELEVATION);
+
+  // The visible Sun: a photosphere mesh + corona halo in one group, placed at
+  // sunWorldPos. It IS the authoritative light source — lighting directions
+  // are derived from its position, and every lighting mode (manual, auto,
+  // full daylight) moves the Sun together with the light it produces.
+  private sunGroup: THREE.Group | null = null;
+  private sunMesh: THREE.Mesh | null = null;
+  private sunMaterial: THREE.ShaderMaterial | null = null;
+  private sunCorona: THREE.Sprite | null = null;
+  /** World-space position of the light source = sun.direction * SUN_DISTANCE. */
+  private sunWorldPos = new THREE.Vector3();
+  /** Per-frame point-source light direction for the Moon (see animate()). */
+  private moonSunDir = new THREE.Vector3();
   // Full Daylight: the user's manual Sun, remembered while the Sun follows
   // the camera and restored exactly when the mode is switched off.
   private savedManualSun = { azimuth: INITIAL_SUN_AZIMUTH, elevation: INITIAL_SUN_ELEVATION };
@@ -553,6 +587,9 @@ export class EarthScene {
 
   init(): void {
     this.applyURLParams();
+    this.createSun();
+    this.loadSun();
+    this.createComposer();
     this.loadEarth().catch((err) => {
       console.error('Failed to load Earth:', err);
       // Stop the render loop and release GPU resources before showing the
@@ -610,7 +647,7 @@ export class EarthScene {
       this.scaleMode = 'real';
     }
     const focusParam = params.get('focus');
-    if (focusParam === 'earth' || focusParam === 'moon' || focusParam === 'system') {
+    if (focusParam === 'earth' || focusParam === 'moon' || focusParam === 'sun' || focusParam === 'system') {
       // 'moon'/'system' need the Moon to exist — applied at the end of
       // loadEarth() (or by the first setFocus after it).
       this.focus = focusParam;
@@ -652,7 +689,7 @@ export class EarthScene {
     // Far plane covers the Real-Scale Moon (center-to-center 60.3) with the
     // camera pulled out to ~100 for the System view; the star field lives
     // at 200–350, well inside the frustum.
-    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 1200);
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 2400);
     camera.position.copy(this.initialCameraPosition);
     return camera;
   }
@@ -850,6 +887,201 @@ export class EarthScene {
   }
 
   // ------------------------------------------------------------
+  // SUN — THE VISIBLE LIGHT SOURCE
+  // ------------------------------------------------------------
+  // The Sun is a real, navigable object AND the authoritative light source.
+  // It sits at sunWorldPos = sun.direction * SUN_DISTANCE, and:
+  //   • Earth (at the origin) is lit along normalize(sunWorldPos) — exactly
+  //     the shared sun.direction the existing uniforms already use, so its
+  //     shading is bit-identical to the old infinite-rays model.
+  //   • The Moon is lit from its real position (sunDirectionToward), a true
+  //     point source — which is what makes the lunar phase geometrically
+  //     consistent with the visible Sun.
+  // Every lighting mode (manual, auto, full daylight) moves this object, so
+  // the disk, the corona and the illuminated hemispheres always agree.
+  private createSun(): void {
+    const group = new THREE.Group();
+
+    // Photosphere: real sphere, 4K solar texture (procedural granulation
+    // until it lands, or forever if it fails), limb darkening, and an HDR
+    // brightness of ~1.5 so it reads as the scene's brightest object and is
+    // the only thing above the bloom threshold.
+    const material = new THREE.ShaderMaterial({
+      uniforms: {
+        uMap: { value: null },
+        uHasMap: { value: 0.0 },
+        uTime: { value: 0.0 },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        varying vec3 vNormalW;
+        varying vec3 vPosW;
+        void main() {
+          vUv = uv;
+          vNormalW = normalize(mat3(modelMatrix) * normal);
+          vec4 worldPos = modelMatrix * vec4(position, 1.0);
+          vPosW = worldPos.xyz;
+          gl_Position = projectionMatrix * viewMatrix * worldPos;
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D uMap;
+        uniform float uHasMap;
+        uniform float uTime;
+        varying vec2 vUv;
+        varying vec3 vNormalW;
+        varying vec3 vPosW;
+
+        float sHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123); }
+        float sNoise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          float a = sHash(i);
+          float b = sHash(i + vec2(1.0, 0.0));
+          float c = sHash(i + vec2(0.0, 1.0));
+          float d = sHash(i + vec2(1.0, 1.0));
+          return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+        }
+        float sFbm(vec2 p) {
+          float v = 0.0;
+          float a = 0.5;
+          for (int i = 0; i < 5; i++) { v += a * sNoise(p); p *= 2.03; a *= 0.5; }
+          return v;
+        }
+
+        void main() {
+          vec3 N = normalize(vNormalW);
+          vec3 V = normalize(cameraPosition - vPosW);
+          float ndv = clamp(dot(N, V), 0.0, 1.0);
+
+          // Real solar disk (SDO 4K) with a procedural granulation fallback.
+          vec3 tex = texture2D(uMap, vUv).rgb;
+          vec3 procedural = mix(vec3(1.0, 0.52, 0.14), vec3(1.0, 0.92, 0.62),
+                                sFbm(vUv * vec2(26.0, 13.0)));
+          vec3 base = mix(procedural, tex, uHasMap);
+
+          // Slowly drifting granulation — convection cells on the surface.
+          float gran = sFbm(vUv * vec2(48.0, 24.0) + vec2(uTime * 0.005, uTime * 0.003));
+          base *= 0.92 + 0.16 * gran;
+
+          // Limb darkening: the solar disk dims measurably toward the limb.
+          float limb = 0.42 + 0.58 * pow(ndv, 0.5);
+
+          gl_FragColor = vec4(base * limb * 1.55, 1.0);
+        }
+      `,
+    });
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(SUN_RADIUS, 96, 96), material);
+    group.add(mesh);
+
+    // Corona: a billboard halo centered on the Sun. Its center sits behind
+    // the opaque photosphere (depth test), so only the annular glow around
+    // the limb is visible — the classic solar corona, always facing camera.
+    const corona = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: this.makeCoronaTexture(),
+      blending: THREE.AdditiveBlending,
+      transparent: true,
+      depthWrite: false,
+      opacity: 0.9,
+    }));
+    corona.scale.setScalar(SUN_RADIUS * 5.5);
+    group.add(corona);
+
+    this.scene.add(group);
+    this.sunGroup = group;
+    this.sunMesh = mesh;
+    this.sunMaterial = material;
+    this.sunCorona = corona;
+    this.placeSun();
+  }
+
+  /** Soft radial gradient for the corona sprite (generated, no asset). */
+  private makeCoronaTexture(): THREE.CanvasTexture {
+    const size = 256;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d')!;
+    const half = size / 2;
+    const grad = ctx.createRadialGradient(half, half, 0, half, half, half);
+    // Stops relative to the halo radius (= sprite scale / 2 = 2.75 disk
+    // radii): the disk limb itself sits at ~0.36 of that radius.
+    grad.addColorStop(0.0, 'rgba(255, 252, 240, 1.0)');
+    grad.addColorStop(0.36, 'rgba(255, 232, 190, 0.5)');
+    grad.addColorStop(0.55, 'rgba(255, 200, 135, 0.2)');
+    grad.addColorStop(0.8, 'rgba(255, 168, 92, 0.06)');
+    grad.addColorStop(1.0, 'rgba(255, 150, 80, 0.0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, size, size);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+
+  /**
+   * Position the visible Sun at the authoritative light-source position.
+   * Called every frame after the active lighting mode has written
+   * `sun.direction` — manual, auto and full daylight all flow through it.
+   */
+  private placeSun(): void {
+    if (!this.sunGroup) return;
+    this.sunWorldPos.copy(this.sun.direction).multiplyScalar(SUN_DISTANCE);
+    this.sunGroup.position.copy(this.sunWorldPos);
+  }
+
+  /** Swap the 4K solar map into the photosphere when it lands. */
+  private loadSun(): void {
+    const loader = new THREE.TextureLoader();
+    loader.setCrossOrigin('anonymous');
+    loader.loadAsync('/assets/sun/sun-4k.jpg')
+      .then((tex) => {
+        if (this.disposed) {
+          tex.dispose();
+          return;
+        }
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
+        this.textures.push(tex);
+        if (this.sunMaterial) {
+          this.sunMaterial.uniforms.uMap.value = tex;
+          this.sunMaterial.uniforms.uHasMap.value = 1.0;
+        }
+      })
+      .catch((err) => {
+        // Keep the procedural granulation — the Sun still renders.
+        console.warn('Sun map failed to load; using procedural granulation:', err);
+      });
+  }
+
+  // ------------------------------------------------------------
+  // POST-PROCESSING — SUN BLOOM
+  // ------------------------------------------------------------
+  // RenderPass → UnrealBloom → OutputPass. The scene renders into a linear
+  // HalfFloat target: three only enables TONE_MAPPING when rendering to the
+  // screen, so the existing shaders' tone-mapping/color-space includes are
+  // no-ops there, Earth/Moon/clouds look exactly as before, and OutputPass
+  // applies ACES + sRGB exactly once at the end. With a 1.0 threshold only
+  // the Sun's HDR values (~1.5) bloom.
+  private createComposer(): void {
+    const pr = this.renderer.getPixelRatio();
+    const size = new THREE.Vector2(
+      window.innerWidth * pr,
+      window.innerHeight * pr,
+    );
+    const renderTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
+      type: THREE.HalfFloatType,
+      samples: 4, // keep the same MSAA quality as direct rendering
+    });
+    const composer = new EffectComposer(this.renderer, renderTarget);
+    composer.addPass(new RenderPass(this.scene, this.camera));
+    const bloom = new UnrealBloomPass(size, 0.7, 0.5, 1.0);
+    composer.addPass(bloom);
+    composer.addPass(new OutputPass());
+    this.composer = composer;
+  }
+
+  // ------------------------------------------------------------
   // STAR FIELD
   // ------------------------------------------------------------
   private createStarField(): THREE.Points {
@@ -1002,9 +1234,11 @@ export class EarthScene {
       fragmentShader: moonFragmentShader,
       uniforms: {
         uTexture: { value: placeholder },
-        // The ONE shared Sun — the same Vector3 Earth, clouds and atmosphere
-        // reference, so the Moon phase always matches the Earth lighting.
-        uSunDirection: { value: this.sun.direction },
+        // Point-source light: recomputed every frame from the Sun's real
+        // world position (sunDirectionToward, see animate) so the lunar
+        // phase follows true Sun–Earth–Moon geometry rather than the shared
+        // parallel-ray direction the rest of the scene uses.
+        uSunDirection: { value: this.moonSunDir },
         uBumpScale: { value: 1.6 },
         uDebugMode: { value: 0.0 },
       },
@@ -1069,6 +1303,7 @@ export class EarthScene {
 
   /** Resolve the live world-space center of the current focus target. */
   private focusCenter(out: THREE.Vector3): THREE.Vector3 {
+    if (this.focus === 'sun') return out.copy(this.sunWorldPos);
     if (this.focus === 'moon') return out.copy(this.moonPosition);
     if (this.focus === 'system') return out.copy(this.moonPosition).multiplyScalar(0.5);
     return out.copy(this._origin);
@@ -1094,6 +1329,20 @@ export class EarthScene {
         // Stay above the surface with room for the map to resolve.
         minDistance: MOON_RADIUS * 1.6,
         maxDistance: 6,
+      };
+    }
+    if (focus === 'sun') {
+      const target = this.sunWorldPos.clone();
+      const dir = this._v.copy(this.camera.position).sub(target);
+      if (dir.lengthSq() < 1e-8) dir.set(0, 0.25, 1);
+      dir.normalize();
+      return {
+        // Approach from ~3.5 disk radii: an impressive close-up with the
+        // full corona halo in frame.
+        position: target.clone().addScaledVector(dir, SUN_RADIUS * 3.5),
+        target,
+        minDistance: SUN_RADIUS * 2.2, // never clip inside the photosphere
+        maxDistance: SUN_DISTANCE * 1.2, // pull back until Earth fits too
       };
     }
     // system: pull back until BOTH bodies fit in the vertical FOV.
@@ -1160,7 +1409,7 @@ export class EarthScene {
   private setFocus(f: Focus): void {
     this.focus = f;
     this.syncFocusUI();
-    if (f !== 'earth' && !this.moonMesh) {
+    if ((f === 'moon' || f === 'system') && !this.moonMesh) {
       // Moon not built yet (textures still loading) — apply once ready.
       this.pendingFocus = f;
       return;
@@ -1214,11 +1463,13 @@ export class EarthScene {
       const meshes: THREE.Mesh[] = [];
       if (this.moonMesh) meshes.push(this.moonMesh);
       if (this.earthMesh) meshes.push(this.earthMesh);
+      if (this.sunMesh) meshes.push(this.sunMesh);
       const hits = this.raycaster.intersectObjects(meshes, false);
       if (!hits.length) return;
       const hit = hits[0].object;
       if (hit === this.moonMesh) this.setFocus('moon');
       else if (hit === this.earthMesh) this.setFocus('earth');
+      else if (hit === this.sunMesh) this.setFocus('sun');
     });
   }
 
@@ -1615,6 +1866,10 @@ export class EarthScene {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
+    if (this.composer) {
+      this.composer.setPixelRatio(this.renderer.getPixelRatio());
+      this.composer.setSize(w, h);
+    }
     if (this.sunPad) {
       const r = this.sunPad.getBoundingClientRect();
       if (r.width > 0) this.padHalf = Math.min(r.width, r.height) / 2;
@@ -1655,6 +1910,10 @@ export class EarthScene {
       const nextAz = wrapAzimuth(this.sun.azimuth + dt * 10);
       this.updateSun(nextAz, this.sun.elevation);
     }
+    // Park the visible Sun at the light source (sun.direction * SUN_DISTANCE)
+    // so the disk, the corona and the hemisphere they illuminate can never
+    // disagree — in manual, auto and full-daylight mode alike.
+    this.placeSun();
 
     // Moon: advance the orbit (Paused / Visualized / Real Time), reposition,
     // and keep the camera target glued to the focused moving body.
@@ -1669,10 +1928,26 @@ export class EarthScene {
         this.controls.target.copy(this.focusCenter(this._v));
       }
     }
+    // Authoritative lighting: the Moon is lit from the Sun's real world
+    // position — a true point source — so its phase always matches the
+    // Sun–Earth–Moon geometry on screen. Earth sits at the origin, where
+    // normalize(sunWorldPos) ≡ sun.direction: its existing shared uniform is
+    // already exactly that, so its shading is unchanged.
+    sunDirectionToward(this.sunWorldPos, this.moonPosition, this.moonSunDir);
+    if (this.sunMaterial) {
+      this.sunMaterial.uniforms.uTime.value = this.clock.elapsedTime;
+    }
     this.updateMoonLabel();
 
     this.controls.update();
-    this.renderer.render(this.scene, this.camera);
+    // Composer path: the scene renders into a linear HDR target (existing
+    // shaders' tone-mapping/color-space includes are no-ops there), the Sun's
+    // HDR values drive the bloom, and OutputPass applies ACES + sRGB once.
+    if (this.composer) {
+      this.composer.render();
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
   };
 
   // ------------------------------------------------------------
@@ -1702,6 +1977,13 @@ export class EarthScene {
     // material.dispose() does not dispose textures — free them explicitly
     // (the cloud texture alone is several MB of GPU memory).
     this.textures.forEach((t) => t.dispose());
+    // The corona sprite is not covered by the Mesh/Points/Line traverse above.
+    if (this.sunCorona) {
+      const coronaMat = this.sunCorona.material as THREE.SpriteMaterial;
+      if (coronaMat.map) coronaMat.map.dispose();
+      coronaMat.dispose();
+    }
+    if (this.composer) this.composer.dispose();
     this.controls.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();
