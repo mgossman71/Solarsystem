@@ -1,0 +1,25 @@
+# .agentignore — files/regions an AI agent should skip or treat as read-only context
+# (This is advisory for agents, not a git tool. Lines are path globs or `path:reason`.)
+
+# Build output & lockfiles — never edit, regenerate only
+dist/
+package-lock.json
+*.map
+
+# Dependencies
+node_modules/
+
+# Binary imagery — do not hand-edit; see ASSETS.md + scripts/generate_mobile_textures.py
+public/assets/**
+assets-backup/**
+
+# Generated reports / session artifacts (context, not source)
+code-review-results.md
+
+# Long GLSL strings — read on demand, don't dump into context wholesale
+src/earth/shaders/*.ts
+src/moon/shaders/*.ts
+src/sun/shaders/sun.ts
+
+# One-off throwaway node scripts (the repo convention is to delete these after running)
+scripts/_*.mjs

@@ -609,3 +609,90 @@ npm run dev
   insets on a notched device, and the FPS-guard auto-downgrade on a slow device.
 
 - `prefers-reduced-motion` → instant camera cuts
+---
+
+# REFACTOR CHECKPOINT — `EarthScene.ts` modularization (current session)
+
+## Rule (non-negotiable)
+**Preserve behavior and visuals.** No visual/behavioral test suite exists — only
+`npx tsc --noEmit` and `npm run build`. Those catch *compile* errors, **not** rendering
+regressions. Move code **verbatim** (leaf-first), keep `tsc` + `build` green after each
+step, and do **stateful** object extraction **with a browser open** and a visual check.
+
+## Status
+- Baseline green: `npx tsc --noEmit` ✅ · `npm run build` ✅.
+- `EarthScene.ts`: **2643 → 2119 lines** (~20% off) with **no functional change**.
+
+## Done this session (leaf extractions — compiler-verified)
+| What | New home |
+|------|----------|
+| Quality tiers/profiles/detection/texture paths | `src/core/Quality.ts` |
+| Sun state + `sunDirectionToward` | `src/lighting/SunLighting.ts` |
+| Shared types (`Focus`, `MoonOrbitMode`, `ScaleMode`, `CameraPose`) | `src/core/types.ts` |
+| All sizes/distances (`SUN_*`, `MOON_*`, `STAR_*`, `INITIAL_SUN_*`, `wrapAzimuth`) | `src/config/sceneScale.ts` |
+| Camera/controls defaults + settle/orient timing | `src/config/camera.ts` |
+| `prefersReducedMotion()` | `src/config/mobile.ts` |
+| Earth / Cloud / Atmosphere / Starfield GLSL | `src/earth/shaders/{earth,cloud,atmosphere,starfield}.ts` |
+| Moon + Sun GLSL | `src/moon/shaders/moon.ts` · `src/sun/shaders/sun.ts` |
+| `createStarField` factory | `src/earth/StarField.ts` |
+| Doc scaffolding | `AGENT_START_HERE.md`, `PROJECT_MAP.md`, `ASSETS.md`, `.agentignore`, `docs/*`, `src/earth/README.md` |
+
+> Moon/Sun shader extraction included moving the **design rationale comments** to live with
+> the GLSL (see the headers of `moon/shaders/moon.ts` and `sun/shaders/sun.ts`).
+
+## Next increments (each must end: `tsc` + `build` green **and** a browser visual check)
+
+### 1) Moon → `src/moon/Moon.ts`  *(most isolated; do first)*
+Give the `Moon` class: `mesh`, `material`, `angle`, `position`, `orbitRadius()`,
+`create(loader, segments)`, `updateTransform(scaleMode, debugMode)`, `advance(dt, mode)`,
+`setDebugMode(n)`, `swapGeometry(seg)`, `setTexture(tex)`.
+`EarthScene` **keeps** `moonOrbit` (UI state) + `moonLabelEl` (UI) and routes to the class.
+
+Verified `EarthScene.ts` references (2119-line file) to route/rewrite:
+- **imports** 23–31: `INITIAL_MOON_ANGLE`, `MOON_ORBIT_EXPLORE/INCLINATION/PERIOD_REALTIME/PERIOD_VISUAL/REAL`, `MOON_RADIUS` → move to `Moon.ts`.
+- **fields** 158 `moonMesh`, 159 `moonMaterial`, 160 `moonAngle`, 162 `moonPosition` (readonly) → class.
+- **temps** 172 `_moonDir`, 173 `_moonQuat`, 174 `_plusX` → class. 105 `moonSunDir` → **stays in EarthScene** (shared by `sunDirectionToward` at 2048) *or* becomes `moon.getSunDir(out)` — decide ownership, keep it one instance.
+- **create** 575 (call site), 1180–1229 (`createMoon` method).
+- **transform** 1239–1256 (`updateMoonTransform`), 1258–1260 (`orbitRadius`).
+- **quality swap** 1108 (`swapGeometry(this.moonMesh,…)`), 1148 (`swapTextureSet` → `uTexture`).
+- **focus/framing** 1265–1266 (`focusCenter`), 1306–1317 (moon pose), 1338–1340 (system pose), 1366–1368 (`fitDistance`), 1436 (`setFocus` guard).
+- **selection/label** 1457 (`setScaleMode`), 1464, 1538–1539 (`updateHitProxies`), 1548–1554 (`updateMoonLabel`).
+- **UI/debug** 1873–1875 (Moon visibility toggle), 1916 (`uDebugMode`).
+- **per-frame** 2032–2038 (advance + `updateMoonTransform`), 2048 (phase via `sunDirectionToward`).
+
+Visual checklist: lunar **phases** correct on the moving Moon · tidal lock (near side
+facing Earth, no spin drift) · orbit modes paused/visualized/realtime · focus `moon`/`system`
+reframe + label · quality tier swap (segments + 1k/2k texture) · Moon on/off toggle.
+
+### 2) Sun visuals → `src/sun/Sun.ts`
+Give the `Sun` class: photosphere `mesh` + `material`, `corona` sprite, `place()`
+(`direction × SUN_DISTANCE`), `load(loader)`, `setCoronaOpacity(o)`, `setDebugMode(n)`,
+`swapGeometry(seg)`/`setTexture(tex)`. `SunLightingState` (az/El→direction) stays in
+`lighting/SunLighting.ts`. Sun **UI** (`setupSunUI`) → `src/ui/SunPanel.ts` in step 5.
+Visual checklist: apparent size (~0.5°), limb darkening, granulation, **bloom** (Sun only),
+corona per tier, full-daylight (no terminator) + soft-fill, presets, auto sweep.
+
+### 3) Earth/Clouds/Atmosphere → `src/earth/{Earth,Clouds,Atmosphere}.ts`
+One class each owning mesh + material + `create`/`setDebugMode`/`swap*`; `animate()` pushes
+auto-rotate + cloud-UV offset into `Earth`/`Clouds`. Highest-risk (touches `animate`,
+`applyQualityLevers`, `dispose`, debug state) — **do last of the object extractions** and
+verify the terminator, ocean specular, cloud shadow, atmosphere limb, and day/night
+transition.
+
+### 4) Camera/framing → `src/camera/CameraController.ts`
+Move `createCamera/Controls`, `computeFocusPose`, `fitDistance`, `animateCameraTo`,
+`reframeIfOutOfFrame`, `focusCenter`, orientation reframe. `config/camera.ts` already holds
+the constants. Verify: focus fly-to (and reduced-motion instant cut), min/max zoom,
+moving-target tracking, orientation reframe.
+
+### 5) UI → `src/ui/`
+`setupUI`/`uiHandler` → `src/ui/controls.ts`; `setupSunUI`/`updateSunUI` → `src/ui/SunPanel.ts`;
+`setupSheet` → `src/ui/sheet.ts`. All talk to `EarthScene` through a small interface (they
+read/write `state` + call focus/scale/orbit/quality actions). Verify: delegated clicks,
+no double-binding on the Sun panel, sheet drag/snap, mobile vs desktop layouts.
+
+## Target end state
+`EarthScene.ts` is a slim **orchestrator**: constructs the modules, holds the interactive
+`state` (focus/scale/orbit/quality + toggles), runs `loadEarth()`, `animate()`, and
+`dispose()` — delegating each body's creation/updates to its module. Every `tsc`+`build`
+green **and** visually verified per step.
