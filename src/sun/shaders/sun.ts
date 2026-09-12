@@ -56,5 +56,13 @@ export const sunFragmentShader = /* glsl */ `
           float limb = 0.42 + 0.58 * pow(ndv, 0.5);
 
           gl_FragColor = vec4(base * limb * 1.55, 1.0);
+
+          // Parity with the other scene shaders (Earth, cloud, atmosphere,
+          // starfield, Moon). No-ops while rendering into the composer's
+          // render target (tone-map + color space apply there via OutputPass),
+          // but keeps every shader consistent if anything ever renders
+          // straight to the screen.
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
         }
       `;

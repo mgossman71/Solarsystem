@@ -69,7 +69,7 @@ export const earthFragmentShader = /* glsl */ `
       float lum = dot(raw, vec3(0.299, 0.587, 0.114));
       // Ocean mask (used only for the specular sheen): open ocean in this albedo
       // map is strongly blue-dominant with low luminance; land is not.
-      float oceanMask = smoothstep(0.28, 0.04, lum)
+      float oceanMask = (1.0 - smoothstep(0.04, 0.28, lum))
                       * smoothstep(0.8, 1.2, raw.b / max(raw.r, 0.001));
       vec3 dayColor = raw;
 

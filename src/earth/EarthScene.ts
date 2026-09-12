@@ -124,6 +124,9 @@ export class EarthScene {
   private lastElShown: number | null = null;
   private lastKnobTransform: string | null = null;
   private clock: THREE.Clock;
+  /** One signal for every DOM listener this class attaches — abort() in
+   *  dispose() removes all of them at once and cannot drift out of sync. */
+  private ac = new AbortController();
 
   private isInteracting = false;
   private interactionTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -150,7 +153,7 @@ export class EarthScene {
   /** Textures already fetched, keyed by file path — live tier switches reuse them. */
   private textureCache = new Map<string, THREE.Texture>();
   /** Runtime FPS guard state (Auto only; steps down, never up). */
-  private fpsGuard = { acc: 0, frames: 0, lastEval: 0, cooldownUntil: 0, appliedDowngrade: 0 };
+  private fpsGuard = { acc: 0, frames: 0, lastEval: 0, cooldownUntil: 0 };
 
   // ------------------------------------------------------------
   // MOON + NAVIGATION
@@ -293,6 +296,20 @@ export class EarthScene {
         );
       }
     }
+
+    // The constructor resolved 'auto' before the URL / localStorage preference
+    // was known. Re-resolve here, BEFORE createSun / createComposer / loadEarth
+    // build anything from the profile, so every consumer is constructed at the
+    // right tier. (Do NOT call applyQuality() here — the composer does not
+    // exist yet, and it would be orphaned by init()'s createComposer().)
+    const resolved = resolveProfile(this.qualitySetting);
+    if (resolved.tier !== this.quality!.tier) {
+      this.quality = resolved;
+      this.qualityEpoch++;
+      this.renderer.setPixelRatio(
+        Math.min(window.devicePixelRatio, resolved.pixelRatioCap),
+      );
+    }
   }
 
   // ------------------------------------------------------------
@@ -300,7 +317,10 @@ export class EarthScene {
   // ------------------------------------------------------------
   private createRenderer(): THREE.WebGLRenderer {
     const renderer = new THREE.WebGLRenderer({
-      antialias: true,
+      // NOTE: canvas MSAA has no effect here — the scene always renders through
+      // the EffectComposer into a render target, where only the target's
+      // `samples` (per-tier msaaSamples) apply. Left for clarity, not cost.
+      antialias: false,
       alpha: false,
       powerPreference: 'high-performance',
     });
@@ -326,7 +346,7 @@ export class EarthScene {
     // address-bar-driven layout changes on iOS/Android.
     window.addEventListener('orientationchange', this.onOrientationChange);
     if (window.visualViewport) {
-      window.visualViewport.addEventListener('resize', this.onResize);
+      window.visualViewport.addEventListener('resize', this.onResize, { signal: this.ac.signal });
     }
     // Returning from bfcache (iOS back/forward) can leave a stale size.
     window.addEventListener('pageshow', this.onResize);
@@ -456,8 +476,8 @@ export class EarthScene {
       this.trackAsset('Earth · night lights', this.loadTextureKey(loader, 'night')),
     ]);
     this.loadedAtTier = this.quality!.tier;
-
-    this.textures.push(dayTexture, nightTexture);
+    // (dayTexture/nightTexture are already tracked in this.textures by
+    // loadTextureKey — one owner per texture.)
 
     // Both cloud consumers sample only the alpha channel, so a 1x1 fully
     // transparent placeholder is pixel-identical to "no clouds" (cloud shell:
@@ -593,6 +613,12 @@ export class EarthScene {
     // QA URL params that need the materials to exist before applying.
     if (this.pendingSoftfill) this.setSoftDaylight(true);
     if (this.pendingFrontlight) this.setFullDaylight(true);
+    // The pending flags were consumed above — reset them so the instance
+    // doesn't keep reporting already-applied state.
+    this.pendingSoftfill = false;
+    this.pendingFrontlight = false;
+    this.pendingSunRay = false;
+    this.pendingDebugMode = null;
 
     // If the quality tier changed while the first-paint assets were loading
     // (e.g. a fast UI toggle), re-apply the levers now that all consumers exist
@@ -836,7 +862,7 @@ export class EarthScene {
 
   private setupUI(): void {
     // Single delegated handler — survives any responsive re-parenting.
-    document.body.addEventListener('click', this.uiHandler);
+    document.body.addEventListener('click', this.uiHandler, { signal: this.ac.signal });
 
     // Initial sync pass: URL params (?clouds=0, ?atmosphere=0, ?rotate=0) may
     // have changed the state before this ran — reflect it in the button
@@ -852,7 +878,7 @@ export class EarthScene {
       document.addEventListener('fullscreenchange', () => {
         const on = document.fullscreenElement != null;
         fsBtns.forEach((b) => (b as HTMLElement).classList.toggle('active', on));
-      });
+      }, { signal: this.ac.signal });
     }
 
     // Quality UI, bottom sheet, interaction dimming.
@@ -901,27 +927,33 @@ export class EarthScene {
     toggle.addEventListener('click', () => {
       const s = this.sheetState();
       this.setSheetState(s === 'collapsed' ? 'half' : 'collapsed');
-    });
-    close?.addEventListener('click', () => this.setSheetState('collapsed'));
+    }, { signal: this.ac.signal });
+    close?.addEventListener('click', () => this.setSheetState('collapsed'), { signal: this.ac.signal });
     handle?.addEventListener('click', () => {
       if (this.sheetDrag.moved) { this.sheetDrag.moved = false; return; } // a drag just ended
       const s = this.sheetState();
       this.setSheetState(s === 'collapsed' ? 'half' : s === 'half' ? 'full' : 'collapsed');
-    });
+    }, { signal: this.ac.signal });
 
     // Drag the handle to scrub between states (pointer events cover touch +
     // mouse; the canvas behind never sees these because they start on the
     // sheet, not the canvas).
     const onDown = (e: PointerEvent): void => {
       this.sheetDrag = { y: e.clientY, active: true, moved: false };
-      this.sheetEl!.style.transition = 'none';
-      this.sheetEl!.setPointerCapture(e.pointerId);
       this.sheetDragFrom = this.sheetOffset(this.sheetState()); // px
+      // NOTE: no setPointerCapture here — capturing on the sheet retargets the
+      // click to #sheet and breaks the delegated uiHandler for every control
+      // inside it. Capture only once this is a real drag (see onMove).
     };
     const onMove = (e: PointerEvent): void => {
       if (!this.sheetDrag.active) return;
       const dy = e.clientY - this.sheetDrag.y;
-      if (Math.abs(dy) > 8) this.sheetDrag.moved = true;
+      if (!this.sheetDrag.moved) {
+        if (Math.abs(dy) <= 8) return; // still a tap — leave the click alone
+        this.sheetDrag.moved = true;
+        this.sheetEl!.style.transition = 'none';
+        this.sheetEl!.setPointerCapture(e.pointerId);
+      }
       // target offset: base + dy, clamped between full (0) and collapsed (max).
       const from = this.sheetDragFrom;
       const maxOff = this.sheetOffset('collapsed');
@@ -931,6 +963,7 @@ export class EarthScene {
     const onUp = (e: PointerEvent): void => {
       if (!this.sheetDrag.active) return;
       this.sheetDrag.active = false;
+      if (!this.sheetDrag.moved) return; // a tap: let the click through
       try { this.sheetEl!.releasePointerCapture(e.pointerId); } catch { /* noop */ }
       this.sheetEl!.style.transition = '';
       const dy = e.clientY - this.sheetDrag.y;
@@ -944,17 +977,18 @@ export class EarthScene {
         if (d < bestD) { bestD = d; best = s; }
       }
       this.setSheetState(best);
-      this.sheetDrag.moved = true; // suppress the click that follows this drag
+      // `moved` stays true so the click that follows this drag is suppressed;
+      // the handle's click listener resets it.
     };
     const sheet = this.sheetEl;
-    sheet.addEventListener('pointerdown', onDown);
-    sheet.addEventListener('pointermove', onMove);
-    sheet.addEventListener('pointerup', onUp);
-    sheet.addEventListener('pointercancel', onUp);
+    sheet.addEventListener('pointerdown', onDown, { signal: this.ac.signal });
+    sheet.addEventListener('pointermove', onMove, { signal: this.ac.signal });
+    sheet.addEventListener('pointerup', onUp, { signal: this.ac.signal });
+    sheet.addEventListener('pointercancel', onUp, { signal: this.ac.signal });
     // Escape closes it (a11y parity with a dialog).
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') this.setSheetState('collapsed');
-    });
+    }, { signal: this.ac.signal });
     // Apply the JS-computed offset for the initial state so the peek matches
     // the visualViewport-based math (not just the CSS dvh fallback), and so
     // the toggle's aria-expanded / active class reflect reality on first paint.
@@ -1049,6 +1083,20 @@ export class EarthScene {
     this.syncQualityUI();
   }
 
+  /** Free composer passes + targets. EffectComposer.dispose() does NOT free
+   *  passes added via addPass() — UnrealBloomPass alone owns 11 render
+   *  targets (plus OutputPass's material/quad); without this, every tier
+   *  switch and every dispose leaks them to the GPU. */
+  private disposeComposer(): void {
+    if (!this.composer) return;
+    for (const pass of this.composer.passes) {
+      (pass as { dispose?: () => void }).dispose?.();
+    }
+    this.composer.dispose();
+    this.composer = null;
+    this.bloomPass = null;
+  }
+
   /** The renderer-facing levers (pixel ratio, bloom, stars, segments, textures). */
   private applyQualityLevers(prev?: QualityProfile): void {
     const profile = this.quality!;
@@ -1068,8 +1116,7 @@ export class EarthScene {
     const prevBloom = this.bloomPass != null;
     const wantBloom = profile.bloom.enabled;
     if (prevBloom !== wantBloom || from.msaaSamples !== profile.msaaSamples) {
-      this.composer = null;
-      this.bloomPass = null;
+      this.disposeComposer();
       this.createComposer();
     } else if (this.bloomPass) {
       this.bloomPass.strength = profile.bloom.strength;
@@ -1092,6 +1139,9 @@ export class EarthScene {
       this.starField.geometry.dispose();
       this.starField = null;
       const fresh = createStarField(this.scene, this.quality!.starCount);
+      // createStarField always builds a fresh material — free it, we reuse
+      // the previous one (same shader source, so nothing is lost).
+      (fresh.material as THREE.Material).dispose();
       fresh.material = material;
       fresh.renderOrder = order;
       fresh.visible = visible;
@@ -1544,21 +1594,27 @@ export class EarthScene {
   // ------------------------------------------------------------
   // MOON LABEL (System view only)
   // ------------------------------------------------------------
+  private lastMoonLabelDisplay: string | null = null;
   private updateMoonLabel(): void {
     const el = this.moonLabelEl;
     if (!el) return;
     if (this.focus !== 'system' || !this.moonMesh) {
-      el.style.display = 'none';
+      if (this.lastMoonLabelDisplay !== 'none') el.style.display = 'none';
+      this.lastMoonLabelDisplay = 'none';
       return;
     }
     this._v.copy(this.moonPosition).project(this.camera);
     if (this._v.z > 1) {
-      el.style.display = 'none';
+      if (this.lastMoonLabelDisplay !== 'none') el.style.display = 'none';
+      this.lastMoonLabelDisplay = 'none';
       return;
     }
     const x = (this._v.x * 0.5 + 0.5) * window.innerWidth;
     const y = (-this._v.y * 0.5 + 0.5) * window.innerHeight;
-    el.style.display = 'block';
+    if (this.lastMoonLabelDisplay !== 'block') {
+      el.style.display = 'block';
+      this.lastMoonLabelDisplay = 'block';
+    }
     el.style.transform = `translate(-50%, -170%) translate(${x}px, ${y}px)`;
   }
 
@@ -1727,12 +1783,12 @@ export class EarthScene {
       if (this.state.fullDaylight) return;
       this.setAutoSun(false);
       this.updateSun(parseFloat(azSlider.value), this.sun.elevation);
-    });
+    }, { signal: this.ac.signal });
     elSlider.addEventListener('input', () => {
       if (this.state.fullDaylight) return;
       this.setAutoSun(false);
       this.updateSun(this.sun.azimuth, parseFloat(elSlider.value));
-    });
+    }, { signal: this.ac.signal });
 
     // Circular pad: left/right = azimuth, up/down = elevation
     let dragging = false;
@@ -1765,27 +1821,27 @@ export class EarthScene {
       dragging = false;
       if (pad.hasPointerCapture(e.pointerId)) pad.releasePointerCapture(e.pointerId);
     };
-    pad.addEventListener('pointerdown', onDown);
-    pad.addEventListener('pointermove', onMove);
-    pad.addEventListener('pointerup', onUp);
-    pad.addEventListener('pointercancel', onUp);
+    pad.addEventListener('pointerdown', onDown, { signal: this.ac.signal });
+    pad.addEventListener('pointermove', onMove, { signal: this.ac.signal });
+    pad.addEventListener('pointerup', onUp, { signal: this.ac.signal });
+    pad.addEventListener('pointercancel', onUp, { signal: this.ac.signal });
 
     // Presets (only change the Sun)
     panel.querySelectorAll('[data-preset]').forEach((btn) => {
-      btn.addEventListener('click', () => this.applySunPreset((btn as HTMLElement).dataset.preset!));
+      btn.addEventListener('click', () => this.applySunPreset((btn as HTMLElement).dataset.preset!), { signal: this.ac.signal });
     });
 
     // Reset Sun
     const resetBtn = panel.querySelector('[data-action="reset-sun"]');
-    resetBtn?.addEventListener('click', () => this.resetSun());
+    resetBtn?.addEventListener('click', () => this.resetSun(), { signal: this.ac.signal });
 
     // Auto Sun toggle
     const autoBtn = panel.querySelector('[data-action="auto-sun"]') as HTMLElement | null;
-    autoBtn?.addEventListener('click', () => this.setAutoSun(!this.state.autoSun));
+    autoBtn?.addEventListener('click', () => this.setAutoSun(!this.state.autoSun), { signal: this.ac.signal });
 
     // Soft Daylight fill toggle (optional subtle studio fill)
     const softFill = document.getElementById('sun-softfill') as HTMLInputElement | null;
-    softFill?.addEventListener('change', () => this.setSoftDaylight(softFill.checked));
+    softFill?.addEventListener('change', () => this.setSoftDaylight(softFill.checked), { signal: this.ac.signal });
 
     this.updateSunPanelState();
     this.updateSunUI();
@@ -1797,7 +1853,7 @@ export class EarthScene {
       const collapsed = panel.classList.toggle('collapsed');
       if (body) body.classList.toggle('hidden', collapsed);
       collapseBtn.textContent = collapsed ? '+' : '\u2212';
-    });
+    }, { signal: this.ac.signal });
   }
 
   /**
@@ -1839,10 +1895,11 @@ export class EarthScene {
   // Layer-isolation tools for diagnosing rendering defects: per-layer
   // visibility (surface / clouds / atmosphere / stars), a surface-normal view,
   // a "sun ramp" view that visualizes the exact dot(normal, sunDir) footprint,
-  // and the Sun direction ray. There is no post-processing in this app (no
-  // composer — final output is each shader's tone-mapping/color-space
-  // includes + the renderer's tone-mapping settings), so there is nothing
-  // extra to disable here.
+  // and the Sun direction ray. Post-processing IS active: createComposer()
+  // runs unconditionally in init() and animate() renders only through it,
+  // with UnrealBloom on every tier except 'performance'. So these validation
+  // views are still tone-mapped and bloomed by OutputPass — they do not
+  // isolate the surface shading as cleanly as a direct-to-screen render would.
   private setupDebugPanel(): void {
     const panel = document.createElement('div');
     panel.className = 'debug-panel';
@@ -1963,7 +2020,10 @@ export class EarthScene {
   // ------------------------------------------------------------
   private animate = (): void => {
     this.animationId = requestAnimationFrame(this.animate);
-    const dt = this.clock.getDelta();
+    // A backgrounded tab returns a dt of seconds-to-minutes. Clamp it: the FPS
+    // guard would read it as a stall and downgrade, and the Moon orbit /
+    // Auto-Sun sweep would jump a visible step.
+    const dt = Math.min(this.clock.getDelta(), 0.25);
 
     // Runtime FPS guard (Auto mode only): if the device can't sustain the
     // current tier for a sustained window, step one tier down — never back up,
@@ -1990,17 +2050,18 @@ export class EarthScene {
             this.applyQualityLevers(from);
             this.syncQualityUI(); // reflect the auto-drop in the Quality buttons
             this.fpsGuard.cooldownUntil = now + 15000;
-            this.fpsGuard.appliedDowngrade++;
           }
         }
       }
     }
 
     if (this.state.autoRotate && !this.isInteracting) {
-      if (this.earthMesh) this.earthMesh.rotation.y += 0.0001;
+      // dt-scaled (×60 keeps the previous 60 Hz rate) so 120/144 Hz displays
+      // do not spin 2–2.4× faster.
+      if (this.earthMesh) this.earthMesh.rotation.y += 0.0001 * dt * 60;
       // Clouds drift very slightly faster than the surface — a slow relative
       // motion, never visibly racing the planet.
-      if (this.cloudMesh) this.cloudMesh.rotation.y += 0.00015;
+      if (this.cloudMesh) this.cloudMesh.rotation.y += 0.00015 * dt * 60;
     }
 
     // Keep surface cloud shadows tracking the cloud layer: cloud drift is a
@@ -2066,6 +2127,10 @@ export class EarthScene {
   // ------------------------------------------------------------
   dispose(): void {
     this.disposed = true;
+    // Remove every DOM listener this class attached (window, document, sheet,
+    // sun pad/panel, body click — see the { signal } registrations) in one
+    // shot; also lets the detached EarthScene become collectable.
+    this.ac.abort();
     if (this.animationId != null) cancelAnimationFrame(this.animationId);
     this.animationId = null;
     if (this.resetAnimId != null) cancelAnimationFrame(this.resetAnimId);
@@ -2074,12 +2139,7 @@ export class EarthScene {
       clearTimeout(this.interactionTimeout);
       this.interactionTimeout = null;
     }
-    window.removeEventListener('resize', this.onResize);
-    window.removeEventListener('orientationchange', this.onOrientationChange);
-    window.removeEventListener('pageshow', this.onResize);
-    window.visualViewport?.removeEventListener('resize', this.onResize);
     if (this.reframeTimer != null) clearTimeout(this.reframeTimer);
-    document.body.removeEventListener('click', this.uiHandler);
     // Cover Mesh, Points and Line (the sun-ray ArrowHelper contains a Line
     // whose geometry/material were previously skipped).
     this.scene.traverse((obj) => {
@@ -2099,18 +2159,8 @@ export class EarthScene {
       if (coronaMat.map) coronaMat.map.dispose();
       coronaMat.dispose();
     }
-    // Dispose the post-processing passes first: EffectComposer.dispose() only
-    // frees its own read/write targets and copy pass, NOT the passes added via
-    // addPass(). UnrealBloomPass owns 11 render targets + several materials + a
-    // full-screen quad, and OutputPass its own material/quad — free them so
-    // repeated create/dispose cycles don't exhaust the GPU texture budget.
-    if (this.composer) {
-      for (const pass of this.composer.passes) {
-        (pass as { dispose?: () => void }).dispose?.();
-      }
-      this.composer.dispose();
-      this.composer = null;
-    }
+    // (Composer passes/targets are freed via disposeComposer() — see above.)
+    this.disposeComposer();
     this.controls.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();
