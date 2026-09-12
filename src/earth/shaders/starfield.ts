@@ -17,7 +17,7 @@ export const starFragmentShader = /* glsl */ `
   void main() {
     float dist = length(gl_PointCoord - vec2(0.5));
     if (dist > 0.5) discard;
-    float alpha = smoothstep(0.5, 0.0, dist) * vBrightness;
+    float alpha = (1.0 - smoothstep(0.0, 0.5, dist)) * vBrightness;
     gl_FragColor = vec4(vec3(0.9, 0.92, 1.0), alpha);
 
     #include <tonemapping_fragment>
