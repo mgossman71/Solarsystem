@@ -1,150 +1,188 @@
-# Code Review — Web-Earth
+# Web-Earth — Full Code Review
 
-**Date:** 2026-09-11
-**Branch:** `mobileFriendly` (HEAD `bb84e28`)
-**Scope:** `src/` (main.ts, earth/EarthScene.ts, earth/Quality.ts, earth/SunLighting.ts), `index.html`, `scripts/`, config (`package.json`, `tsconfig.json`, `vite.config.ts`, `Dockerfile`, `docker-compose.yml`).
+- **Date:** 2026-09-12
+- **Scope:** entire repository — `src/` (all 14 TS modules), `index.html` (UI + CSS), `package.json`, `tsconfig.json`, `vite.config.ts`, `Dockerfile`, `docker-compose.yml`
+- **Method:** line-by-line read of every source file; cross-file invariant checks (shared Sun vector, quality levers, disposal, DOM wiring); DOM id/`data-*` attribute audit against `index.html`; `npx tsc --noEmit` (passes, exit 0); behavior verified against installed `three@0.186.0` sources where relevant.
 
-**Verification performed**
+## Verdict
 
-- `npm run build` (`tsc --strict` + `vite build`) — **passes** (one >500 kB chunk warning, see N5).
-- `node scripts/lighting_math_test.mjs` — **124/124 checks pass**.
-- Findings below were checked against the installed `node_modules/three` source (r186), not memory.
-
-**Overall:** This is a well-organized, unusually well-commented codebase — single-source Sun state, allocation-free render loop, epoch-guarded async swaps, careful disposal, real (non-fake) asset fallbacks, and a headless math test for the lighting model. The review found **two functional bugs**, one resource leak, and a batch of lower-severity items. **Status: H1 (fps-guard units) is fixed; H2, M1–M3, and the Low/nit items remain open.**
+Well-structured, unusually well-documented code. Strict TypeScript, clean module boundaries, no dead `console.log`s, no TODOs, graceful asset-fallback chains, and genuinely careful memory management. Findings below are real but **none is a security hole or a data-loss bug**; the most important ones are one incorrect technical claim in comments (§A), one listener-leak path in `dispose()` (§B), one dead code path (§C), and a handful of behavioral/edge-case bugs (§D).
 
 ---
 
-## High severity (functional bugs)
+## A. Correctness & rendering pipeline
 
-### H1. ✅ RESOLVED — Runtime FPS auto-downgrade could never trigger (unit error)
-`src/earth/EarthScene.ts:2501`
+### A1. MISLEADING/INCORRECT comment: tone-mapping behavior of scene shaders — HIGH (doc)
+`src/earth/EarthScene.ts` lines 738–743 (comment above `createComposer`) states:
 
-```ts
-const fps = (this.fpsGuard.frames / this.fpsGuard.acc) * 1000;
-```
+> "the transparent layers (clouds' alpha, the additive atmosphere and stars) now blend in LINEAR HDR **before that single tone-map**"
 
-`this.fpsGuard.acc` accumulates `this.clock.getDelta()`, and three.js `Clock.getDelta()` returns **seconds** (verified in `node_modules/three/src/core/Clock.js:107-131`: `diff = (newTime - this.oldTime) / 1000`). So `frames / acc` is *already* fps; multiplying by 1000 yields e.g. `60000` for a real 60 fps, and the guard `if (fps < 28)` (line 2505) is **never true**. The entire Auto-tier downgrade feature documented in `Quality.ts` ("steps DOWN one tier if the device can't sustain it") is dead code, and `fpsGuard.appliedDowngrade` can never increment.
+This is not the actual mechanism. In `three@0.186.0` (`node_modules/three/src/renderers/webgl/WebGLPrograms.js` line 177–183), `toneMapping` is only taken from `renderer.toneMapping` **when rendering to the default framebuffer (screen)**. When the scene renders into the `EffectComposer`'s `HalfFloat` render target, every `#include <tonemapping_fragment>` / `<colorspace_fragment>` in the Earth/cloud/atmosphere/star shaders compiles to a no-op (verified against the installed 0.186.0 source). So:
 
-Every other `dt` consumer in `animate()` (moon orbit, auto-Sun sweep, cloud drift) correctly treats `dt` as seconds — this one site is the outlier.
+- **Opaque layers** (Earth, Moon): linear values pass through, `OutputPass` applies ACES+sRGB once — correct. ✔
+- **Transparent layers** (clouds, atmosphere, stars): also blend un-toned-mapped (linear) — the *observed* behavior the comment claims is incidental, not the stated reason. The comment's *reasoning* is wrong, which matters because it documents an invariant nobody can rely on: any future "fix" that re-enables per-material tone mapping would shift the look without anyone knowing why the comment said it was fine.
+- Consequence to be aware of: clouds/atmosphere/star brightness is tone-mapped **after** alpha blending, so their perceived brightness is not independent of the scene behind them.
 
-**Fix:** `const fps = this.fpsGuard.frames / this.fpsGuard.acc;` — **applied** in `EarthScene.ts` (see the `// fpsGuard.acc accumulates clock.getDelta()…` comment). Build re-verified (`npm run build` → exit 0). A headless unit test around the fps computation is still recommended (it's the one piece of the quality system with no coverage).
+**Recommendation:** rewrite the comment to state the actual mechanism (tone-mapping chunks are no-ops for all scene shaders when rendering to an RT; `OutputPass` is the single tone-map + color-space stage), and add a note so nobody "helpfully" restores per-shader tone mapping.
 
-### H2. Saved / URL quality setting is not applied at startup
-`src/earth/EarthScene.ts:621` (constructor) vs `669-682` (`applyURLParams`)
+### A2. Inverted `smoothstep()` edge order — LOW (portability / GLSL UB)
+`src/earth/shaders/earth.ts` line 72 uses `smoothstep(0.28, 0.04, lum)` — edge0 **>** edge1. Per the GLSL spec this is undefined behavior; all major drivers handle it, but it is fragile.
+**Recommendation:** write `1.0 - smoothstep(0.04, 0.28, lum)`.
 
-`this.quality` is resolved **exactly once, in the constructor**, before `init()` runs `applyURLParams()`. `applyURLParams()` then assigns `this.qualitySetting` from `?quality=…` or the `earth-quality` localStorage value, but **never re-resolves `this.quality` and never calls `applyQuality()`**. Consequences:
+### A3. Moon tidal-lock degeneracy — LOW
+`updateMoonTransform()` (EarthScene.ts lines 1239–1252) uses `quaternion.setFromUnitVectors(+X, -normalize(moonPos))`. At `moonAngle ≈ π` (Moon at −X in the orbit plane) the two vectors become anti-parallel and `setFromUnitVectors` picks an **arbitrary** 180° axis, so the near-side face can flip for a frame or two. The orbit is confined to a 5.145°-tilted plane, so the Moon passes close to the degenerate direction twice per orbit.
+**Recommendation:** when `dot(from, to) < -0.999`, use a fixed fallback axis (e.g. rotate about Y by π).
 
-- A user who selected **Performance** (persisted) reloads the page and gets whatever `detectAutoTier()` picked (e.g. High) — pixel ratio, bloom, MSAA, star count, tessellation, and texture set all stay at the constructor's profile.
-- `?quality=performance`, which is explicitly supported "for deterministic scenes for debugging / QA" (comment at line 657), silently does nothing until the user clicks a quality button.
-- The UI is inconsistent: `syncQualityUI()` highlights buttons from `this.qualitySetting`, so the "Performance" button shows active while the renderer is actually running the auto-resolved tier. The "Auto — rendering at …" tooltip (line 1694) likewise reports the stale tier.
+### A4. Moon relief epsilon is a UV-space constant — LOW (visual)
+`src/moon/shaders/moon.ts` line 88: `e = 0.0025` UV units. Per-pixel relief detail changes with zoom, so crater relief fades in/out with distance. Consider `fwidth(vUv.x)`-scaled offsets (standard in WebGL2) for stable relief.
 
-`resolveProfile` is only otherwise called from `applyQuality()` (line 1566), which fires only on `setQuality()` user action.
-
-**Fix:** In `init()`, after `applyURLParams()`, re-resolve the profile (e.g. `this.quality = resolveProfile(this.qualitySetting); this.applyQuality();`) when the setting changed. Note `applyQualityLevers` at the end of `loadEarth()` (line 1024-1028) also keys off the stale `this.quality`, so fixing the resolution point fixes that path too.
+### A5. `antialias: true` on the renderer is dead config — INFO
+`createRenderer()` (EarthScene.ts lines 301–306) enables canvas MSAA, but the scene is always rendered through `EffectComposer` into render targets, where only the RT's `samples` (per-tier `msaaSamples`) matter. Harmless — remove or comment it so no reader believes canvas MSAA is in effect.
 
 ---
 
-## Medium severity
+## B. Lifecycle / resource management
 
-### M1. Composer rebuild on tier switch leaks the old composer's GPU resources
-`src/earth/EarthScene.ts:1592-1597`
+### B1. `dispose()` leaks DOM event listeners — MEDIUM
+`dispose()` (EarthScene.ts lines 2067–2117) removes `window`/`visualViewport`/`body`-click listeners and disposes GPU resources, but **does not remove**:
+
+- the `pointerdown/move/up/cancel` listeners on `#sheet` (setupSheet, lines 950–953),
+- the `document` `keydown` (Escape) listener (line 955),
+- the `pointerdown/move/up/cancel` listeners on `#sun-pad` (lines 1768–1771),
+- all per-button `click` listeners in `setupSunUI` (presets, reset-sun, auto-sun, softfill, collapse — lines 1774–1800),
+- the `document` `fullscreenchange` listener (line 852),
+- the sheet toggle/close/handle click listeners (lines 901–910).
+
+`main.ts` today creates exactly one instance, so this is latent — but the class is designed to be re-creatable (and `window.__earth` exposes it), and any HMR/SPA/test harness that does `dispose(); new EarthScene(...)` accumulates duplicate listeners. **Recommendation:** collect listeners in one array (or use `AbortController` signals) and tear them all down in `dispose()`.
+
+### B2. Double dispose of day/night textures — INFO (benign)
+`loadTextureKey` pushes every successful texture into `this.textures` (line 436), and `loadEarth` pushes the day/night textures **again** (line 460). `dispose()` therefore disposes them twice. `Texture.dispose()` is idempotent so nothing breaks — but dedupe (push in exactly one place) to keep "one owner per texture" honest.
+
+### B3. `visibilitychange` / battery — INFO
+The render loop keeps running while the tab is hidden (rAF is throttled, so cost is ~zero), but `clock.getDelta()` returns a large `dt` on tab return, which feeds the FPS guard (see D3) and the Auto-Sun sweep. Consider pausing the clock or clamping `dt` (e.g. `Math.min(dt, 0.25)`).
+
+---
+
+## C. Dead / unreachable code
+
+### C1. Auto-Sun branch is dead code; the button is a silent no-op — LOW (user-visible)
+EarthScene.ts lines 2017–2024:
 
 ```ts
-if (prevBloom !== wantBloom || from.msaaSamples !== profile.msaaSamples) {
-  this.composer = null;
-  this.bloomPass = null;
-  this.createComposer();
+if (this.state.fullDaylight) {
+  this.updateFullDaylightSun();
+} else if (this.state.autoSun) {
+  const nextAz = wrapAzimuth(this.sun.azimuth + dt * 10);
+  this.updateSun(nextAz, this.sun.elevation);
 }
 ```
 
-The old `EffectComposer` (2 HalfFloat render targets), its `UnrealBloomPass` (11 render targets + materials + quads), `RenderPass` and `OutputPass` are simply abandoned when a topology change forces a rebuild — e.g. toggling High ⇄ Performance at runtime, a normal user action. `dispose()` (lines 2629-2635) shows the correct pattern (dispose every pass, then the composer) and even documents "repeated create/dispose cycles … GPU texture budget", but the rebuild path here never applies it. Repeated toggling on a memory-constrained mobile device will keep allocating until the context runs dry.
+`setAutoSun(true)` first calls `this.setFullDaylight(false)` when full-daylight is on (line 1700), and every other path that sets `autoSun = true` (URL params, UI toggle) goes through `setAutoSun`. So `state.autoSun && state.fullDaylight` is impossible — the `else if` branch is **never executed**, and the "Auto" Sun button (a live UI control, wired at line 1784) does nothing when pressed. **Recommendation:** either delete the Auto-Sun sweep + the `[data-action="auto-sun"]` button (if deprecated) or make the two modes coexist as intended.
 
-**Fix:** Before reassigning, dispose the old composer's passes and the composer itself (extract a `destroyComposer()` helper shared with `dispose()`).
+### C2. Pending debug URL flags are never cleared after application — LOW
+`?frontlight=1`, `?softfill=1`, `?sunray=1`, `?mode=…` set `pending*` flags applied at the end of `loadEarth()` (lines 589–595). They are never reset to their defaults after use, so the object's state remains misleading for anyone inspecting `window.__earth`. Clear them after application.
 
-### M2. `THREE.Clock` is deprecated in the installed three (r186) — console noise + future breakage
-`src/earth/EarthScene.ts:546, 618`
+---
 
-In three r186, `Clock`'s constructor calls `warn('Clock: This module has been deprecated. Please use THREE.Timer instead.')` (verified in `node_modules/three/src/core/Clock.js:61`), so every app startup logs a deprecation warning. `THREE.Timer` is present in the installed build (`src/core/Timer.js`) and is the intended replacement.
+## D. Behavioral / edge-case bugs
 
-**Fix:** Migrate `this.clock` to `THREE.Timer` (careful: `Timer` also reports time in seconds, so the H1 fps math stays valid). Worth doing in the same pass as the H1 fps-guard fix, since both touch timing.
+### D1. `?quality=` URL param does not sync the Quality UI — MEDIUM
+Sequence: `constructor` resolves `'auto'` → `init()` → `applyURLParams()` sets `qualitySetting` from the URL (lines 248–250) — but **nobody calls `applyQuality()` as a result of the URL param alone**. The tier levers are eventually reconciled at the end of `loadEarth()` via the `loadedAtTier` comparison (lines 600–604), which calls `applyQualityLevers`, but `syncQualityUI()` is only invoked from `setupUI()` (line 859), which runs **before** the async `loadEarth` completes. Net effect with e.g. `?quality=performance`:
 
-### M3. `apple gpu` in the "weak GPU" list demotes *all* Apple devices
-`src/earth/Quality.ts:159`
+- the scene ends up at the correct tier ✔
+- the Quality segmented control still highlights **Auto** (or whatever the saved preference was), lying about the active setting ✘
+
+**Recommendation:** in `applyURLParams`, after the URL param wins, call `this.applyQuality()` (renderer already exists at that point — safe). This also updates the UI immediately.
+
+### D2. Old composer not disposed on tier switch (GPU leak per switch) — MEDIUM
+`applyQualityLevers` (lines 1070–1073) does:
 
 ```ts
-const weakGpu = /adreno (…) |^mali (…) |apple gpu/i.test(gpu);
+this.composer = null;
+this.bloomPass = null;
+this.createComposer();
 ```
 
-The unmasked renderer string on every iPhone, iPad and Apple-Silicon Mac contains "Apple GPU". On mobile this means **every** iOS device — including iPhone 16 Pro class hardware — is forced to the `performance` tier (no bloom, 5k stars, 1.5 DPR cap) via `if (weakGpu || cores <= 3 || mem <= 3) return 'performance'` (line 162). On desktops the compound `cores <= 4 && mem <= 4` guard mostly saves it, but the classification itself is unsound: an M3 Max is no more "weak" than an Adreno 1050, yet both match. This contradicts the module's stated goal of "renders at the right cost for the device — not a shrunken desktop".
+without disposing the old composer's passes and render targets. This contradicts the explicit comment in `dispose()` (lines 2102–2106) that composer passes must be disposed "so repeated create/dispose cycles don't exhaust the GPU texture budget" — yet the quality-tier-switch path (which runs on every Auto→explicit switch and every FPS-guard downgrade that changes bloom/MSAA topology) performs exactly that cycle and leaks the old targets (UnrealBloomPass alone owns 11 render targets). **Recommendation:** extract the pass-disposal block from `dispose()` into a `disposeComposer()` helper and call it here before `createComposer()`.
 
-**Fix:** Remove `|apple gpu` from the weak list (or match only specific old families), and rely on the measurable `cores`/`deviceMemory` signals — which is exactly the no-sniffing principle the file's header advertises.
+### D3. FPS guard can misfire after tab background — LOW
+`fpsGuard.acc += dt` (line 1973) uses raw `clock.getDelta()`. After the tab was backgrounded, the first returned `dt` can be seconds, dragging the measured FPS below 28 and triggering an unjustified downgrade (the cooldown only protects *after* a downgrade). Clamp `dt` or reset `acc`/`frames` on `visibilitychange`.
 
----
+### D4. Auto-rotation speed is frame-rate dependent — LOW
+Lines 1999–2004: `earthMesh.rotation.y += 0.0001` per frame. At 144 Hz the globe rotates 2.4× faster than at 60 Hz. Use a `dt`-scaled increment (e.g. `+= 0.0001 * dt * 60`) so speed is wall-clock constant.
 
-## Low severity / robustness
+### D5. `updateMoonLabel` writes DOM every frame even when hidden — INFO
+Lines 1547–1553: when focus ≠ `system` it still assigns `el.style.display = 'none'` every frame (redundant style write). Cache the last written state and skip.
 
-### L1. Textures registered twice → redundant double-dispose
-`src/earth/EarthScene.ts:860` and `:884`
-
-`loadTextureKey()` pushes every successful texture into `this.textures`, and `loadEarth()` additionally pushes `dayTexture, nightTexture` again (line 884). `dispose()` then disposes each twice (harmless — three's `Texture.dispose()` is idempotent — but it makes the array unreliable as a registry). Pick one registration point (the loader is the natural owner).
-
-### L2. Cloud-texture swap can race the background cloud load
-`src/earth/EarthScene.ts:963-975` vs `1651-1680`
-
-The non-blocking cloud `.then()` (line 964) writes `uCloudTexture` unconditionally when it resolves, while `swapTextureSet()` (tier change) writes the same uniforms with an epoch guard. If a tier switch lands between the cloud load resolving and its `.then` executing, the *older set's* cloud map wins (last write, no epoch check). Visually minor (1k vs 2k clouds), but it's the one unguarded async write in an otherwise epoch-disciplined design.
-
-**Fix:** Capture `this.qualityEpoch` when the cloud load starts in `loadEarth()` and skip the write if it changed.
-
-### L3. `dispose()` leaves a tail of DOM listeners and the GL context behind
-`src/earth/EarthScene.ts:2589-2639`
-
-Disposed: window resize/orientation/pageshow, body click, rAF chains, timers, GPU objects. **Not** disposed: the sun-pad pointer listeners, sun-panel button listeners, sheet listeners, the document `keydown` (Escape) listener, and `renderer.forceContextLoss()` is never called (the WebGL context lives on until GC). `dispose()` currently only runs on the fatal load-failure path, so impact is small — but any driver that repeatedly constructs/disposes `EarthScene` (the `window.__earth` hook invites this) will accumulate dead listeners and orphaned GL contexts (browsers cap these at ~16).
-
-### L4. `INITIAL_MOON_ANGLE` comment contradicts the geometry
-`src/earth/EarthScene.ts:470`
-
-`INITIAL_MOON_ANGLE = -60°` places the Moon at `z ≈ −8.6` — i.e. **behind** the Earth from the default +Z camera, not "right of Earth, not behind it" as the comment claims. Either the comment or the constant is wrong; decide the intended initial composition and align them.
-
-### L5. URL-parameter documentation omits `?focus=sun`
-`src/earth/EarthScene.ts:659-662` lists `?focus=earth|moon|system`, but `applyURLParams()` (line 703) also accepts `focus=sun`, and the shipped UI exposes a Sun focus button. Update the comment — it's the de-facto QA reference for this app.
-
-### L6. Accessibility
-- `index.html:5` — `maximum-scale=1.0, user-scalable=no` disables user pinch-zoom, which trips WCAG 1.4.4. Understandable for a full-screen WebGL canvas (the CSS already pins canvas gestures with `touch-action:none`), so the viewport ban may be redundant — consider allowing it and keeping `touch-action` scoped to the canvas.
-- The loading progress bar has no `role="progressbar"`/`aria-live`; screen-reader users get a static "Loading…" label with no completion signal.
-- No `<noscript>` fallback (the page is otherwise 100% JS).
+### D6. `setQuality`/`applyQuality` asymmetry vs FPS-guard path — INFO
+The FPS-guard downgrade (lines 1983–1994) mutates `this.quality`, `qualityEpoch`, and calls `applyQualityLevers` + `syncQualityUI` directly, bypassing `applyQuality()`. It works, but it is a second, hand-rolled copy of that logic — if `applyQuality` ever gains a step (e.g. an event hook, analytics), the guard path silently skips it. Route the guard through `applyQuality` (guarding against setting changes) or a shared private helper.
 
 ---
 
-## Nits
+## E. Accessibility & browser-compat
 
-- **N1. `Quality.ts:136`** — `gpuRendererString()` re-acquires `WEBGL_lose_context` via a second `getExtension()` call through an `unknown` cast; simpler to keep one reference: `const lose = gl.getExtension('WEBGL_lose_context'); if (lose) lose.loseContext();`
-- **N2. Stale one-off diagnostic scripts** — `scripts/check_baked_lighting.py` and `scripts/verify_new_texture.py` reference `earth-blue-marble.jpg` and `/tmp/earth-daymap-2k.jpg`, which no longer exist (renamed to `earth-day-albedo.jpg`); `scripts/verify_moon_texture.py:19` hardcodes an absolute `/Users/gozz/...` path. They now fail out of the box — make paths relative like the other scripts, or mark them as historical.
-- **N3. `package.json`** — no `test` script; `node scripts/lighting_math_test.mjs` is the only test and discoverable only by reading `scripts/`. Add `"test": "node scripts/lighting_math_test.mjs"`.
-- **N4. `Dockerfile`** — no nginx cache-header config for `public/assets/*` (multi-MB JPEGs). A small `nginx.conf` with `Cache-Control` for `/assets/` is cheap bandwidth/UX for the mobile audience this app targets.
-- **N5. Build** — Vite reports a 643 kB (161 kB gzip) single chunk (all of three.js + app). Fine at this app size, but code-splitting `three` + postprocessing into their own chunks would trim initial parse on mobile.
-- **N6. `EarthScene.ts:577`** — `fpsGuard.appliedDowngrade` is written but never read; surface it in a `?debug` panel or drop it.
-- **N7. `EarthScene.ts:2039`** — comment "raycast ignores visible" is easy to misread (the intended behavior — raycasting still *hits* `visible:false` proxies — does work); consider "raycast hits despite visible=false".
+- **E1 — MEDIUM (WCAG):** `index.html` line 5: `maximum-scale=1.0, user-scalable=no` in the viewport meta disables pinch-zoom for **everyone**, including the DOM UI (sliders, buttons, panels). It's fine for the canvas (OrbitControls owns the gesture, and `touch-action: none` on the canvas already covers that at line 30), but it also prevents zooming the DOM chrome, a WCAG 1.4.4 concern. **Recommendation:** drop `maximum-scale=1.0, user-scalable=no` from the viewport meta.
+- **E2 — GOOD:** `[hidden] { display:none !important }` (line 33), `aria-pressed`/`aria-expanded` kept in sync, `Escape` closes the sheet, `prefers-reduced-motion` respected for auto-rotate and camera tweens, fullscreen button hidden on iOS Safari. Solid a11y base.
+- **E3 — INFO:** no `<noscript>` fallback; without JS the page is a black screen with a stuck loading bar. A one-line noscript message would help.
+- **E4 — GOOD:** all DOM ids and `data-*` attributes referenced in `EarthScene.ts` were verified present in `index.html` (audit run 2026-09-12 — 100% match).
 
 ---
 
-## What's notably good (keep doing)
+## F. Architecture, style, process
 
-- **Single source of truth for Sun state** (`SunLightingState` shared by reference into every `uSunDirection` uniform) — no lighting consumer can drift from another.
-- **Headless lighting-math test** replicating the exact shader pipeline (124 assertions) — rare and valuable for shader work.
-- **No per-frame allocations** in `animate()` (scratch vectors, cached DOM refs, skip-unchanged writes in `updateSunUI`).
-- **Epoch-guarded async texture swaps** and real lower-res fallbacks (never procedural fakes), with graceful non-blocking cloud/moon/sun loads.
-- **Thorough disposal** in `dispose()` (pass-level bloom teardown, explicit texture disposal, corona sprite) — the M1 rebuild path is the one exception.
-- **Reduced-motion respect** (auto-rotate off, zero-duration camera transitions), generous invisible hit proxies for touch, and pointer-capture discipline on pad/sheet.
-- Sensible defensive details: `?sun=` clamping, localStorage in try/catch, iOS fullscreen detection, bfcache `pageshow` resize, `overscroll-behavior:none`.
+**Strengths (keep these intact in any refactor):**
+
+1. Single-source-of-truth config split (`config/sceneScale.ts`, `config/camera.ts`, `config/mobile.ts`) is clean and actually used everywhere.
+2. The shared `SunLightingState.direction` Vector3 referenced by all three `uSunDirection` uniforms is an elegant invariant — verified all three consumers (earth line 485, cloud line 511, atmosphere line 560) reference the same instance, and the Moon correctly uses a *separate* per-frame point-source direction (`moonSunDir`, line 2048).
+3. No allocations in the hot loop (scratch `_v`, `_moonDir`, `_moonQuat`, `_sunTmp` reused).
+4. Asset fallback chains + 1×1 `DataTexture` placeholders for clouds/moon mean first paint never fails.
+5. `qualityEpoch` staleness guard for in-flight texture swaps (line 1139) — correct.
+6. Disposal is 90% there (geometry/material/texture/composer/controls/renderer all covered).
+7. `tsc --noEmit` passes with `strict: true`; no unused imports; no debug leftovers.
+
+**Suggestions:**
+
+- **F1 — the 2119-line `EarthScene.ts` is the single biggest structural risk.** The refactor direction in `PROJECT_MAP.md` (extract `Moon`, `Sun`, `Earth` object classes; a `UIController` for the ~600 lines of sheet/sun-panel/debug-panel wiring) is the right next step. The UI section alone (`setupUI`/`setupSheet`/`setupSunUI`/`setupDebugPanel`/`syncUIButtons`/`syncQualityUI`/`syncFocusUI`) is already cohesive, and extracting it would also fix the B1 listener-leak in one place.
+- **F2 — `this.quality!` non-null assertions appear 20+ times.** Invariant-safe today, but a single `assertQuality()` helper (or resolving quality in a place TS can narrow) would remove them.
+- **F3 — `applyURLParams` mixes two concerns** (quality-setting precedence: URL > localStorage > auto; and state parsing). Split into `resolveQualitySetting()` + `applyStateParams()` — `Quality.ts` is already a pure module and the resolution logic belongs with it (also enables unit testing, see F4).
+- **F4 — no automated tests.** `scripts/lighting_math_test.mjs` is the only one. The pure modules (`Quality.ts`, `SunLighting.ts`, `sceneScale.ts`) are trivially unit-testable (tier detection, `wrapAzimuth`, az/el ↔ vector round-trips) and would guard the A1/D1 regressions. Vitest fits the existing Node 22 toolchain in ~30 lines of config.
+- **F5 — `package.json`:** `three` `^0.186.0` vs `@types/three` `^0.185.4` — the minors drift; align them or comment the tolerated skew. Also no `engines` field.
+- **F6 — Docker:** multi-stage build is correct, healthcheck is good, `.dockerignore` correctly keeps `node_modules`/`dist` out of the build context.
+- **F7 — `vite.config.ts` `build.target: 'esnext'`** while `tsconfig` targets ES2020 — fine for a self-hosted site; align if browser support ever matters.
 
 ---
 
-## Suggested order of fixes
+## G. Security
 
-1. ~~**H1** fps-guard units (one line + a test)~~ — **done** (removed the `* 1000`; build re-verified).
-2. **H2** quality-setting resolution at startup (a few lines) — persisted/URL settings are currently ignored.
-3. **M1** composer teardown on rebuild (extract a shared helper).
-4. **M3** drop `apple gpu` from the weak-GPU regex (one line, big real-world effect on iOS).
-5. **M2** `Clock` → `Timer` migration (bundles naturally with #1).
-6. L1–L3, then nits as they get touched.
+- **G1 — GOOD:** no `innerHTML`/`eval`/`new Function` anywhere; all dynamic DOM is `textContent` or attribute writes with static values.
+- **G2 — GOOD:** URL parameters are strictly validated (enum sets, numeric parsing with `Number.isFinite`, explicit clamps to `[-180,180]`/`[-90,90]`) — no injection surface.
+- **G3 — INFO:** `window.__earth` is intentionally exposed (main.ts line 9) — documented as a debug hook; acceptable for a public site, just be aware it exposes the full scene graph and `dispose()` to the console.
+- **G4 — GOOD:** `localStorage` access is wrapped in try/catch (private-mode safe).
+- **G5 — INFO:** no security headers (static site on nginx defaults). Low risk for a static-only app, but consider a basic `Content-Security-Policy` + `X-Content-Type-Options: nosniff` in an nginx `server { }` block for hygiene.
+
+---
+
+## H. Summary of actionable items (prioritized)
+
+| # | Sev | Location | Issue | Fix |
+|---|-----|----------|-------|-----|
+| 1 | MED | EarthScene.ts 1070–1073 | Old composer not disposed on tier switch (GPU leak per switch) | Extract `disposeComposer()` and call before `createComposer()` |
+| 2 | MED | EarthScene.ts 2067–2117 | `dispose()` leaves sheet/pad/sun-panel/Escape/fullscreen listeners bound | Collect & remove in `dispose()` (or `AbortController`) |
+| 3 | MED | EarthScene.ts 245–258, 859 | `?quality=` URL param doesn't update Quality UI highlight | Call `applyQuality()` after the URL param wins |
+| 4 | MED | index.html 5 | `user-scalable=no, maximum-scale=1.0` blocks UI zoom (WCAG 1.4.4) | Drop from viewport meta; `touch-action:none` stays scoped to canvas |
+| 5 | LOW | EarthScene.ts 2017–2024 | Auto-Sun branch unreachable; button is a silent no-op | Delete feature or fix `setAutoSun` interplay |
+| 6 | LOW | EarthScene.ts 738–743 | Comment incorrectly explains tone-mapping behavior | Rewrite to match `three@0.186` actual behavior (A1) |
+| 7 | LOW | shaders/earth.ts 72 | `smoothstep(0.28, 0.04, …)` reversed edges = GLSL UB | `1.0 - smoothstep(0.04, 0.28, lum)` |
+| 8 | LOW | EarthScene.ts 1239–1252 | Moon quaternion degenerate near `angle = π` | Fallback axis for anti-parallel case |
+| 9 | LOW | EarthScene.ts 1999–2004 | Auto-rotation speed ∝ frame rate | Scale increment by `dt` |
+| 10 | LOW | EarthScene.ts 1973 | FPS guard reads un-clamped `dt` after tab return | Clamp `dt` or reset guard on `visibilitychange` |
+| 11 | LOW | EarthScene.ts 436 + 460 | Day/night textures tracked twice (double dispose — benign) | Push into `textures` in one place only |
+| 12 | INFO | EarthScene.ts 301–306 | `antialias: true` unused (composer renders to RT) | Remove or comment |
+| 13 | INFO | EarthScene.ts 1547 | `display:none` written every frame when hidden | Cache last state |
+| 14 | INFO | package.json | `three` 0.186 vs `@types/three` 0.185 skew; no `engines` | Align minors |
+| 15 | INFO | — | No unit tests for pure modules | Vitest for `Quality.ts`, `SunLighting.ts`, `sceneScale.ts` |
+
+---
+
+*End of review — 15 prioritized findings, 4 medium, 7 low, 4 info. No blockers, no security vulnerabilities found.*
 
