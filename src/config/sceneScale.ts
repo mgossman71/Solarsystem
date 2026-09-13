@@ -9,9 +9,11 @@ export const EARTH_RADIUS = 1;
 
 // ---- Sun (a real scene object, not a fake directional light) ----
 // Radius 2.8 at distance 600 gives an apparent size of ~0.53° from Earth
-// (2·atan(2.8/600)) — the true solar angular diameter — while 600 sits well
-// outside the star field (200–350) and ≫ the Moon orbit (≤ 60.3), so its light
-// behaves like a distant point source with physically correct parallax.
+// (2·atan(2.8/600)) — the true solar angular diameter — and ≫ the Moon orbit
+// (≤ 60.3), so its light behaves like a distant point source with physically
+// correct parallax. The star shell sits BEYOND the Sun (STAR_FIELD_RADIUS_*):
+// the skybox is the farthest layer, so the Sun occludes stars behind it
+// instead of stars painting over the bright disk.
 export const SUN_RADIUS = 2.8;
 export const SUN_DISTANCE = 600;
 
@@ -28,9 +30,19 @@ export const INITIAL_MOON_ANGLE = (-60 * Math.PI) / 180; // starts right of Eart
 export const MOON_ORBIT_PERIOD_VISUAL = 60; // s per orbit, "Visualized" mode
 export const MOON_ORBIT_PERIOD_REALTIME = 27.32 * 24 * 3600; // sidereal month, s
 
-// ---- Star field backdrop (kept beyond the Real-Scale Moon orbit) ----
-export const STAR_FIELD_RADIUS_MIN = 200;
-export const STAR_FIELD_RADIUS_SPAN = 150; // radius = MIN + rand() * SPAN (200–350)
+// ---- Star field backdrop ----
+// The shell must sit BEHIND every body the camera looks past, in BOTH scale
+// modes — stars between the camera and a body composite over transparent
+// areas (additive points never write depth → "stars through the rings"). The
+// farthest body is Iapetus in Real scale: Saturn's centre (|r| ≈ 301) plus its
+// true orbit (~559) ≈ 860 from the origin, so the shell's inner edge clears
+// that. 1000–1150 also sits beyond the Sun (600): the skybox is the farthest
+// layer, so the Sun correctly occludes stars behind it. (Per-star pixel size
+// tracks the shell depth via StarField's `uScale`, and star COUNT is
+// radius-independent for a centred camera — so neither needs changing when the
+// band moves.)
+export const STAR_FIELD_RADIUS_MIN = 1000;
+export const STAR_FIELD_RADIUS_SPAN = 150; // radius = MIN + rand() * SPAN (1000–1150)
 
 /** Wrap an azimuth in degrees into the -180..180 range. */
 export function wrapAzimuth(deg: number): number {

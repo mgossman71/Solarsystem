@@ -1,8 +1,9 @@
 /**
  * Saturn body shader — banded gas-giant albedo lit by the shared sun, with
  * structured ring shadows and moon transit shadows, plus the standard debug
- * modes (0 none, 1 normals, 2 albedo ramp, 3 flat white) so the texture can
- * be inspected exactly like the Earth/Moon.
+ * modes — the SAME convention as Earth/Moon (0 none, 1 normals,
+ * 2 sun ramp, 3 white × NdotL) — so the one ?debug panel validates every
+ * body identically (mode 3 deliberately exercises the real sunDot term).
  *
  * World-space lighting (identical convention to `earth/shaders/earth.ts` and
  * `moon/shaders/moon.ts`): the sun direction is computed per frame from the
@@ -85,12 +86,19 @@ export const saturnPlanetFragmentShader = /* glsl */ `
     vec3 n = normalize(vWorldNormal);
     vec3 s = normalize(uSunDirection);
 
+    // Debug modes share the Earth/Moon convention exactly (same panel
+    // buttons, same meaning on every body): 2 = sun ramp (visualizes the
+    // same sunDot the lighting uses), 3 = white × NdotL with the EXACT
+    // production sun calc — so the white-sphere validation and the
+    // ring/moon-shadow tests read identically on Saturn.
     if (uDebugMode == 1) {
       gl_FragColor = vec4(n * 0.5 + 0.5, 1.0);
     } else if (uDebugMode == 2) {
-      gl_FragColor = vec4(vUv, 0.0, 1.0);
+      vec3 ramp = mix(vec3(0.08, 0.14, 0.55), vec3(1.0, 0.85, 0.35),
+                      smoothstep(-0.12, 0.12, dot(n, s)));
+      gl_FragColor = vec4(ramp, 1.0);
     } else if (uDebugMode == 3) {
-      gl_FragColor = vec4(1.0);
+      gl_FragColor = vec4(vec3(max(dot(n, s), 0.0)), 1.0);
     } else {
       vec3 albedo = texture2D(uMap, vUv).rgb;
       float sunDot = dot(n, s);

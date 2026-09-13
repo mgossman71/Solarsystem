@@ -1,14 +1,27 @@
 import * as THREE from 'three';
 import { STAR_FIELD_RADIUS_MIN, STAR_FIELD_RADIUS_SPAN } from '../config/sceneScale';
+
+// Point-size scale for the star vertex shader (its `uScale` uniform). A point
+// sprite renders `aSize * (uScale / depth)` pixels, so for a fixed world size
+// uScale must grow with the depth the stars sit at — the shell radius. 600.0
+// was hand-tuned for the original 200–350 shell (mean ≈ 275); deriving it from
+// the CURRENT shell mean keeps every star the same on-screen size and
+// self-corrects if the band moves again (rather than silently shrinking as the
+// shell was pushed out past the Saturn moons).
+const STAR_SHELL_MEAN = STAR_FIELD_RADIUS_MIN + STAR_FIELD_RADIUS_SPAN / 2;
+const STAR_POINT_SCALE = 600 * (STAR_SHELL_MEAN / 275);
 import { starVertexShader, starFragmentShader } from './shaders/starfield';
 
 /**
  * Build the additive star-sprite backdrop and add it to the scene.
  *
- * Stars are placed on a shell 200–350 units out — beyond the Real-Scale Moon
- * orbit (60.3) — so they always sit behind both bodies and read as an infinitely
- * distant skybox, never between the camera and the Moon. `starCount` is
- * tier-driven (12k desktop / 8k balanced / 5k performance): the stars are
+ * Stars are placed on a shell 1000–1150 units out (STAR_FIELD_RADIUS_*) —
+ * beyond the farthest body in either scale mode (Iapetus in Real scale ≈ 860
+ * from the origin) — so they always sit behind every body and read as an
+ * infinitely distant skybox, never between the camera and a planet (additive
+ * points can't be occluded by the transparent rings, so stars in front of
+ * Saturn's outer moons would otherwise show through them). `starCount` is
+ * tier-driven (20k desktop / 13k balanced / 8.5k performance): the stars are
  * additive point sprites, so the count is a direct fill-rate cost.
  */
 export function createStarField(scene: THREE.Scene, starCount: number): THREE.Points {
@@ -35,6 +48,9 @@ export function createStarField(scene: THREE.Scene, starCount: number): THREE.Po
   const starMaterial = new THREE.ShaderMaterial({
     vertexShader: starVertexShader,
     fragmentShader: starFragmentShader,
+    uniforms: {
+      uScale: { value: STAR_POINT_SCALE },
+    },
     transparent: true,
     depthWrite: false,
     blending: THREE.AdditiveBlending,

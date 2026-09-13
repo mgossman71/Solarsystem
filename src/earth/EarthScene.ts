@@ -14,7 +14,6 @@ import {
   QualitySetting,
   QualityTier,
   TEXTURE_PATHS,
-  detectAutoTier,
   nextTierDown,
   resolveProfile,
 } from '../core/Quality';
@@ -30,8 +29,6 @@ import {
   MOON_ORBIT_PERIOD_VISUAL,
   MOON_ORBIT_REAL,
   MOON_RADIUS,
-  STAR_FIELD_RADIUS_MIN,
-  STAR_FIELD_RADIUS_SPAN,
   SUN_DISTANCE,
   SUN_RADIUS,
   wrapAzimuth,
@@ -42,7 +39,6 @@ import {
   CAMERA_NEAR,
   CONTROLS,
   INITIAL_CAMERA_POSITION,
-  INITIAL_TARGET,
   INTERACTION_SETTLE_MS,
   ORIENTATION_REFRAME_MS,
 } from '../config/camera';
@@ -52,7 +48,6 @@ import { createStarField } from './StarField';
 import { earthVertexShader, earthFragmentShader } from '../earth/shaders/earth';
 import { cloudVertexShader, cloudFragmentShader } from '../earth/shaders/cloud';
 import { atmosphereVertexShader, atmosphereFragmentShader } from '../earth/shaders/atmosphere';
-import { starVertexShader, starFragmentShader } from '../earth/shaders/starfield';
 import { moonVertexShader, moonFragmentShader } from '../moon/shaders/moon';
 import { SaturnSystem } from '../saturn/SaturnSystem';
 import { RING_OUTER, SATURN_MOONS, SATURN_RADIUS, saturnMoonRadius } from '../saturn/config';
@@ -137,7 +132,6 @@ export class EarthScene {
   private disposed = false;
 
   private initialCameraPosition = INITIAL_CAMERA_POSITION.clone();
-  private initialTarget = INITIAL_TARGET.clone();
 
   private animationId: number | null = null;
   /** Handle for the in-flight reset-view transition (at most one at a time). */
@@ -220,13 +214,7 @@ export class EarthScene {
       // overlay — otherwise animate() would keep running requestAnimationFrame
       // forever against a detached canvas.
       this.dispose();
-      const overlay = document.createElement('div');
-      overlay.style.cssText =
-        'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;' +
-        'justify-content:center;color:#fff;font:16px/1.4 system-ui,sans-serif;' +
-        'background:rgba(0,0,0,0.92)';
-      overlay.textContent = 'Failed to load Earth textures.';
-      document.body.appendChild(overlay);
+      this.showFatalOverlay('Failed to load Earth textures.');
     });
     this.setupUI();
     this.setupSunUI();
@@ -245,6 +233,12 @@ export class EarthScene {
   //            ?focus=earth|moon|system  ?orbit=paused|visualized|realtime
   //            ?scale=explore|real
   private debugEnabled = false;
+  /** The ?debug panel element (on <body>) — removed in dispose(). */
+  private debugPanel: HTMLElement | null = null;
+  /** Active debug render mode (0 none, 1 normals, 2 sun ramp, 3 white × NdotL).
+   *  Mode 3 renders a BARE sphere — every cloud-visibility path must consult
+   *  this so a Clouds toggle can't silently re-enable the shell mid-test. */
+  private debugMode = 0;
   private pendingDebugMode: number | null = null;
   private pendingSunRay = false;
   private pendingFrontlight = false;
@@ -289,9 +283,12 @@ export class EarthScene {
       focusParam === 'system' || focusParam === 'saturn' ||
       isSaturnMoonFocus(focusParam as Focus)
     ) {
-      // 'moon'/'system' need the Moon to exist — applied at the end of
-      // loadEarth() (or by the first setFocus after it).
-      this.focus = focusParam as Focus;
+      // Defer every non-default focus until its body exists: loadEarth applies
+      // it through setFocus, which checks isFocusReady(). Do NOT assign
+      // this.focus here — that would bypass the guard, so getFocus() would
+      // report a focus that was never committed and focusCenter() could resolve
+      // it against a not-yet-built body. The default is already 'earth', so
+      // ?focus=earth is a no-op.
       if (focusParam !== 'earth') this.pendingFocus = focusParam as Focus;
     }
     const sunParam = params.get('sun');
@@ -349,16 +346,19 @@ export class EarthScene {
     renderer.domElement.style.height = '100%';
     this.container.appendChild(renderer.domElement);
 
-    window.addEventListener('resize', this.onResize);
+    // Every listener here rides the shared abort signal — dispose() must be
+    // able to remove everything this class attached, including on the
+    // load-failure path.
+    window.addEventListener('resize', this.onResize, { signal: this.ac.signal });
     // Mobile browsers do not always fire `resize` promptly on rotation —
     // orientationchange is the reliable signal, and visualViewport covers
     // address-bar-driven layout changes on iOS/Android.
-    window.addEventListener('orientationchange', this.onOrientationChange);
+    window.addEventListener('orientationchange', this.onOrientationChange, { signal: this.ac.signal });
     if (window.visualViewport) {
       window.visualViewport.addEventListener('resize', this.onResize, { signal: this.ac.signal });
     }
     // Returning from bfcache (iOS back/forward) can leave a stale size.
-    window.addEventListener('pageshow', this.onResize);
+    window.addEventListener('pageshow', this.onResize, { signal: this.ac.signal });
     return renderer;
   }
 
@@ -376,7 +376,7 @@ export class EarthScene {
   private createCamera(): THREE.PerspectiveCamera {
     // Far plane covers the Real-Scale Moon (center-to-center 60.3) with the
     // camera pulled out to ~100 for the System view; the star field lives
-    // at 200–350, well inside the frustum.
+    // at 1000–1150, well inside the 2400 far plane.
     const camera = new THREE.PerspectiveCamera(CAMERA_FOV, window.innerWidth / window.innerHeight, CAMERA_NEAR, CAMERA_FAR);
     camera.position.copy(this.initialCameraPosition);
     return camera;
@@ -414,8 +414,15 @@ export class EarthScene {
   // ------------------------------------------------------------
   // ASSET LOADING — tier-aware, real fallbacks, progress reporting
   // ------------------------------------------------------------
-  /** Five tracked assets: day, night, clouds, moon, sun. */
-  private loadingAssets = { total: 5, done: 0 };
+  /** The first-paint assets tracked via trackAsset() (loadEarth/loadSun/
+   *  createMoon). The overlay total is derived from this list — registering a
+   *  new tracked asset is all it takes to keep the bar reaching 100%; a hard
+   *  `total: 5` could not. */
+  private static readonly FIRST_PAINT_ASSETS = [
+    'Earth · day map', 'Earth · night lights', 'Earth · clouds',
+    'Sun · photosphere', 'Moon · lunar map',
+  ];
+  private loadingAssets = { total: EarthScene.FIRST_PAINT_ASSETS.length, done: 0 };
 
   /** Report asset progress on the loading overlay (no-op after load done). */
   private trackAsset<T>(label: string, promise: Promise<T>): Promise<T> {
@@ -555,6 +562,7 @@ export class EarthScene {
 
     // ?mode=1|2|3 — apply the requested debug render mode once materials exist
     if (this.pendingDebugMode != null) {
+      this.debugMode = this.pendingDebugMode;
       earthMaterial.uniforms.uDebugMode.value = this.pendingDebugMode;
       cloudMaterial.uniforms.uDebugMode.value = this.pendingDebugMode;
       // White-sphere test = bare sphere: keep the cloud shell out of the way.
@@ -868,7 +876,9 @@ export class EarthScene {
         break;
       case 'clouds':
         this.state.clouds = !this.state.clouds;
-        if (this.cloudMesh) this.cloudMesh.visible = this.state.clouds;
+        // Mode 3 (white-sphere validation) renders a BARE sphere — the cloud
+        // shell stays hidden for the whole test regardless of this toggle.
+        if (this.cloudMesh) this.cloudMesh.visible = this.state.clouds && this.debugMode !== 3;
         // Cloud visibility is a pure layer toggle: it never changes the Sun,
         // the surface lighting or the terminator. Only the surface cloud
         // shadows (part of the cloud layer) switch with it.
@@ -1007,9 +1017,14 @@ export class EarthScene {
     sheet.addEventListener('pointermove', onMove, { signal: this.ac.signal });
     sheet.addEventListener('pointerup', onUp, { signal: this.ac.signal });
     sheet.addEventListener('pointercancel', onUp, { signal: this.ac.signal });
-    // Escape closes it (a11y parity with a dialog).
+    // Escape closes it (a11y parity with a dialog) — but only while the sheet
+    // is actually visible (mobile): on desktop #sheet is display:none, where
+    // Escape must not mutate scene state, and a collapsed sheet has nothing
+    // to close.
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') this.setSheetState('collapsed');
+      if (e.key !== 'Escape' || !this.sheetEl) return;
+      if (window.getComputedStyle(this.sheetEl).display === 'none') return;
+      if (this.sheetState() !== 'collapsed') this.setSheetState('collapsed');
     }, { signal: this.ac.signal });
     // Apply the JS-computed offset for the initial state so the peek matches
     // the visualViewport-based math (not just the CSS dvh fallback), and so
@@ -1197,7 +1212,7 @@ export class EarthScene {
   }
 
   /** Load the new tier's texture set and swap it into every consumer. */
-  private async swapTextureSet(profile: QualityProfile): Promise<void> {
+  private async swapTextureSet(_profile: QualityProfile): Promise<void> {
     const epoch = this.qualityEpoch;
     const loader = new THREE.TextureLoader();
     loader.setCrossOrigin('anonymous');
@@ -1413,7 +1428,7 @@ export class EarthScene {
     }
     if (focus === 'saturn') {
       const target = this.saturn!.center(this._v).clone();
-      let dir = this._v.copy(this.camera.position).sub(target);
+      const dir = this._v.copy(this.camera.position).sub(target);
       if (dir.lengthSq() < 1e-8) dir.set(0, 0.25, 1);
       dir.normalize();
       // The default sun sits NEARLY SIDE-ON to Saturn (Earth-view fly-in
@@ -1437,7 +1452,7 @@ export class EarthScene {
       const mw = this.saturn.moonWorld(focus, this._v);
       if (mw) {
         const target = mw.clone();
-        let dir = this._v.copy(this.camera.position).sub(target);
+        const dir = this._v.copy(this.camera.position).sub(target);
         if (dir.lengthSq() < 1e-8) dir.set(0, 0.25, 1);
         dir.normalize();
         // Same night-side guard as the planet (moons share its sun geometry).
@@ -1478,11 +1493,15 @@ export class EarthScene {
    */
   private reframeIfOutOfFrame(): void {
     if (this.resetAnimId != null || this.disposed) return;
+    // Deferred focus whose body is still loading: skip the reframe rather
+    // than frame a stale origin (Moon at 0,0,0) or touch a null Saturn
+    // (the M1 crash path on a mobile orientation change).
+    if (!this.isFocusReady(this.focus)) return;
     const focus = this.focus;
     const target = this.focusCenter(this._v);
     const cameraDist = this.camera.position.distanceTo(target);
     const margin = 1.08;
-    let required = 0;
+    let required: number; // every branch below assigns before the read
     if (focus === 'earth') required = this.fitDistance(1.08, 0, margin);
     else if (focus === 'moon') required = this.fitDistance(MOON_RADIUS, 0, margin * 1.1);
     else if (focus === 'sun') required = this.fitDistance(SUN_RADIUS * 2.75, 0, margin * 1.05);
@@ -1543,11 +1562,22 @@ export class EarthScene {
   }
 
   private syncFocusUI(): void {
+    // A request deferred for a still-loading body shows as selected already,
+    // so the UI gives immediate feedback while the camera waits for it.
+    const active = this.pendingFocus ?? this.focus;
     document.querySelectorAll('[data-focus]').forEach((el) => {
       const h = el as HTMLElement;
-      h.classList.toggle('active', h.dataset.focus === this.focus);
-      h.setAttribute('aria-pressed', String(h.dataset.focus === this.focus));
+      h.classList.toggle('active', h.dataset.focus === active);
+      h.setAttribute('aria-pressed', String(h.dataset.focus === active));
     });
+  }
+
+  /** True once the body behind `f` has been built (Earth/Sun exist before
+   *  any UI is wired; Moon and Saturn arrive with the first-paint assets). */
+  private isFocusReady(f: Focus): boolean {
+    if (f === 'earth' || f === 'sun') return true;
+    if (f === 'moon' || f === 'system') return this.moonMesh != null;
+    return isSaturnFocus(f) && this.saturn != null;
   }
 
   /**
@@ -1555,21 +1585,21 @@ export class EarthScene {
    * cinematic transition and re-point OrbitControls at the new target.
    * While focused on a moving body, animate() keeps the controls target
    * glued to it every frame.
+   *
+   * The focus is only COMMITTED once its body exists: while it's still
+   * loading, the request waits in pendingFocus (applied by loadEarth), so
+   * per-frame code (orientation reframes, scale changes) can never frame a
+   * stale origin or touch a not-yet-constructed Saturn.
    */
   private setFocus(f: Focus): void {
-    this.focus = f;
-    this.syncFocusUI();
-    if ((f === 'moon' || f === 'system') && !this.moonMesh) {
-      // Moon not built yet (textures still loading) — apply once ready.
+    if (!this.isFocusReady(f)) {
       this.pendingFocus = f;
-      return;
-    }
-    if (isSaturnFocus(f) && !this.saturn) {
-      // Saturn system not constructed yet (first-paint still loading) — apply once ready.
-      this.pendingFocus = f;
+      this.syncFocusUI();
       return;
     }
     this.pendingFocus = null;
+    this.focus = f;
+    this.syncFocusUI();
     this.animateCameraTo(this.computeFocusPose(f));
   }
 
@@ -1592,8 +1622,9 @@ export class EarthScene {
       h.classList.toggle('active', h.dataset.scale === mode);
       h.setAttribute('aria-pressed', String(h.dataset.scale === mode));
     });
-    // The system span changed — re-frame if we are looking at it.
-    if (this.focus !== 'earth' && (this.moonMesh || isSaturnFocus(this.focus))) {
+    // The system span changed — re-frame if we are looking at it (and its
+    // body exists — a deferred focus must not compute a pose against null).
+    if (this.focus !== 'earth' && this.isFocusReady(this.focus)) {
       this.animateCameraTo(this.computeFocusPose(this.focus));
     }
   }
@@ -1662,9 +1693,23 @@ export class EarthScene {
     this.hitProxies.push(saturn);
     for (let i = 0; i < SATURN_MOONS.length; i++) {
       const def = SATURN_MOONS[i];
-      const proxy = make(Math.max(0.8, saturnMoonRadius(def, 'explore') * 1.6), def.id as Focus, i);
+      // Unit sphere: the pick radius is applied as a per-frame scale in
+      // updateHitProxies() so it stays scale-mode-aware (in Real scale the
+      // true moon radii are 7–25× smaller than exploration-size pick spheres).
+      const proxy = make(1, def.id as Focus, i);
+      proxy.mesh.scale.setScalar(this.saturnMoonPickRadius(def, this.scaleMode));
       this.hitProxies.push(proxy);
     }
+  }
+
+  /** Pick radius for a Saturn moon in the active scale mode. Exploration:
+   *  generous (≥ 0.8, ~1.6× the exploration size) so a finger tap lands.
+   *  Real: capped at ~2.5× the TRUE radius so a tap clearly aimed at empty
+   *  space can't select a 0.03-unit Mimas (a fixed 0.8 floor would be
+   *  7–25× its rendered size). */
+  private saturnMoonPickRadius(def: (typeof SATURN_MOONS)[number], mode: ScaleMode): number {
+    const r = saturnMoonRadius(def, mode);
+    return mode === 'real' ? Math.max(0.2, r * 2.5) : Math.max(0.8, r * 1.6);
   }
 
   /** Keep the moving proxies in lock-step with their bodies (per frame). */
@@ -1677,7 +1722,7 @@ export class EarthScene {
       } else if (p.focus === 'moon') {
         p.mesh.visible = this.moonMesh != null;
         if (this.moonMesh) p.mesh.position.copy(this.moonPosition);
-      } else if (p.saturnIndex != null) {
+      } else if (isSaturnFocus(p.focus)) {
         // Saturn proxies are only useful when we're actually there.
         if (!this.saturn) { p.mesh.visible = false; continue; }
         const here = isSaturnFocus(this.focus);
@@ -1685,6 +1730,10 @@ export class EarthScene {
           p.mesh.visible = here;
           if (here) this.saturn.center(p.mesh.position);
         } else {
+          // Scale-aware pick radius: the unit sphere is scaled to the active
+          // scale mode's tappable size (see saturnMoonPickRadius).
+          const pick = this.saturnMoonPickRadius(SATURN_MOONS[p.saturnIndex!], this.scaleMode);
+          if (p.mesh.scale.x !== pick) p.mesh.scale.setScalar(pick);
           p.mesh.visible = here;
           if (here) {
             const mw = this.saturn.moonWorld(p.focus, this._v);
@@ -1859,8 +1908,11 @@ export class EarthScene {
   private setAutoSun(on: boolean): void {
     if (on && this.state.fullDaylight) this.setFullDaylight(false);
     this.state.autoSun = on;
-    const autoBtn = document.querySelector('[data-action="auto-sun"]') as HTMLElement | null;
-    if (autoBtn) autoBtn.classList.toggle('active', on);
+    // Every instance (both layouts share the same DOM) — same convention as
+    // syncUIButtons, so a duplicated button can never desync.
+    document.querySelectorAll('[data-action="auto-sun"]').forEach((el) => {
+      (el as HTMLElement).classList.toggle('active', on);
+    });
   }
 
   private setupSunUI(): void {
@@ -2027,7 +2079,7 @@ export class EarthScene {
         this.earthMesh.visible = !this.earthMesh.visible;
         surfaceBtn.classList.toggle('active', this.earthMesh.visible);
       }
-    });
+    }, { signal: this.ac.signal });
 
     const moonBtn = makeToggle('Moon', true);
     moonBtn.addEventListener('click', () => {
@@ -2035,19 +2087,19 @@ export class EarthScene {
         this.moonMesh.visible = !this.moonMesh.visible;
         moonBtn.classList.toggle('active', this.moonMesh.visible);
       }
-    });
+    }, { signal: this.ac.signal });
 
     const cloudBtn = makeToggle('Clouds', this.state.clouds);
     cloudBtn.addEventListener('click', () => {
       this.state.clouds = !this.state.clouds;
-      if (this.cloudMesh) this.cloudMesh.visible = this.state.clouds;
+      if (this.cloudMesh) this.cloudMesh.visible = this.state.clouds && this.debugMode !== 3;
       if (this.earthMaterial) {
         this.earthMaterial.uniforms.uCloudShadowStrength.value =
           this.state.clouds ? 0.2 : 0.0;
       }
       cloudBtn.classList.toggle('active', this.state.clouds);
       this.syncUIButtons(); // keep the main UI button in lockstep
-    });
+    }, { signal: this.ac.signal });
 
     const atmoBtn = makeToggle('Atmosphere', this.state.atmosphere);
     atmoBtn.addEventListener('click', () => {
@@ -2055,14 +2107,14 @@ export class EarthScene {
       if (this.atmosphereMesh) this.atmosphereMesh.visible = this.state.atmosphere;
       atmoBtn.classList.toggle('active', this.state.atmosphere);
       this.syncUIButtons(); // keep the main UI button in lockstep
-    });
+    }, { signal: this.ac.signal });
 
     const starsBtn = makeToggle('Stars', this.state.stars);
     starsBtn.addEventListener('click', () => {
       this.state.stars = !this.state.stars;
       if (this.starField) this.starField.visible = this.state.stars;
       starsBtn.classList.toggle('active', this.state.stars);
-    });
+    }, { signal: this.ac.signal });
 
     // Exclusive render modes: 0 normal, 1 normals, 2 sun ramp, 3 white sphere
     const modes: Array<[string, number]> = [
@@ -2073,6 +2125,7 @@ export class EarthScene {
     ];
     const modeBtns: HTMLButtonElement[] = [];
     const applyDebugMode = (mode: number): void => {
+      this.debugMode = mode; // single source of truth for the bare-sphere rule
       if (this.earthMaterial) this.earthMaterial.uniforms.uDebugMode.value = mode;
       if (this.moonMaterial) this.moonMaterial.uniforms.uDebugMode.value = mode;
       if (this.cloudMaterial) this.cloudMaterial.uniforms.uDebugMode.value = mode;
@@ -2084,10 +2137,10 @@ export class EarthScene {
       }
       modeBtns.forEach((b, i) => b.classList.toggle('active', i === mode));
     };
-    modes.forEach(([label, mode], i) => {
+    modes.forEach(([label, mode]) => {
       const btn = makeToggle(label, mode === 0);
       modeBtns.push(btn);
-      btn.addEventListener('click', () => applyDebugMode(mode));
+      btn.addEventListener('click', () => applyDebugMode(mode), { signal: this.ac.signal });
     });
 
     const rayBtn = makeToggle('Sun ray', false);
@@ -2095,8 +2148,9 @@ export class EarthScene {
       this.showSunRay = !this.showSunRay;
       if (this.sunRay) this.sunRay.visible = this.showSunRay;
       rayBtn.classList.toggle('active', this.showSunRay);
-    });
+    }, { signal: this.ac.signal });
 
+    this.debugPanel = panel;
     document.body.appendChild(panel);
   }
 
@@ -2123,8 +2177,40 @@ export class EarthScene {
   // ------------------------------------------------------------
   // ANIMATION LOOP
   // ------------------------------------------------------------
+  /** Consecutive throwing frames tolerated before the loop gives up — a single
+   *  transient glitch (e.g. one frame in a WebGL context-loss/restore) must not
+   *  freeze the canvas, but a sustained streak is a real failure. */
+  private consecutiveFrameErrors = 0;
+  private readonly maxConsecutiveFrameErrors = 5;
+
   private animate = (): void => {
     this.animationId = requestAnimationFrame(this.animate);
+    try {
+      this.frame();
+      this.consecutiveFrameErrors = 0; // a clean frame breaks any error streak
+    } catch (err) {
+      this.consecutiveFrameErrors++;
+      if (this.consecutiveFrameErrors < this.maxConsecutiveFrameErrors) {
+        // Transient: log it and keep the (already-scheduled) loop alive.
+        console.error(
+          `Frame error (${this.consecutiveFrameErrors} consecutive, recovering):`,
+          err
+        );
+        return;
+      }
+      // Sustained failure: stop the loop, free GPU resources, and surface a
+      // message instead of re-throwing every frame forever.
+      if (this.animationId != null) {
+        cancelAnimationFrame(this.animationId);
+        this.animationId = null;
+      }
+      console.error('Render loop halted after sustained frame errors:', err);
+      this.dispose();
+      this.showFatalOverlay('The 3D scene stopped rendering. Reloading may help.');
+    }
+  };
+
+  private frame = (): void => {
     // A backgrounded tab returns a dt of seconds-to-minutes. Clamp it: the FPS
     // guard would read it as a stall and downgrade, and the Moon orbit /
     // Auto-Sun sweep would jump a visible step.
@@ -2240,6 +2326,19 @@ export class EarthScene {
   // ------------------------------------------------------------
   // LIFECYCLE
   // ------------------------------------------------------------
+
+  /** Full-screen failure surface (the same discipline as the asset-load
+   *  failures): a human-readable message instead of a blank page + raw stack. */
+  private showFatalOverlay(message: string): void {
+    const overlay = document.createElement('div');
+    overlay.style.cssText =
+      'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;' +
+      'justify-content:center;padding:24px;box-sizing:border-box;text-align:center;' +
+      'color:#fff;font:16px/1.5 system-ui,sans-serif;background:rgba(0,0,0,0.92)';
+    overlay.textContent = message;
+    document.body.appendChild(overlay);
+  }
+
   dispose(): void {
     this.disposed = true;
     // Saturn system: stop in-flight texture loads from attaching to disposed
@@ -2249,6 +2348,13 @@ export class EarthScene {
     // sun pad/panel, body click — see the { signal } registrations) in one
     // shot; also lets the detached EarthScene become collectable.
     this.ac.abort();
+    // The ?debug panel is our own DOM on <body> (not in the scene graph) —
+    // its button listeners die with the signal above; remove the element
+    // itself so nothing lingers over a load-failure overlay.
+    if (this.debugPanel) {
+      this.debugPanel.remove();
+      this.debugPanel = null;
+    }
     if (this.animationId != null) cancelAnimationFrame(this.animationId);
     this.animationId = null;
     if (this.resetAnimId != null) cancelAnimationFrame(this.resetAnimId);

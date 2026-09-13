@@ -354,7 +354,8 @@ export class SaturnSystem {
     return i < 0 ? null : this.moons[i].radius;
   }
 
-  /** Debug-panel hook — same modes as the Moon (0 none, 1 normals, 2 UV, 3 white). */
+  /** Debug-panel hook — the shared Earth/Moon/Saturn convention
+   *  (0 none, 1 normals, 2 sun ramp, 3 white × NdotL). */
   setDebugMode(mode: number): void {
     if (this.planetMaterial.uniforms.uDebugMode) this.planetMaterial.uniforms.uDebugMode.value = mode;
     for (const m of this.moons) {
