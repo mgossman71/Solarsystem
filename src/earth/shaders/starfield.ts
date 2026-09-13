@@ -2,11 +2,12 @@ export const starVertexShader = /* glsl */ `
   attribute float aSize;
   attribute float aBrightness;
   varying float vBrightness;
+  uniform float uScale;   // set in StarField.ts from the shell radius
 
   void main() {
     vBrightness = aBrightness;
     vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-    gl_PointSize = aSize * (600.0 / -mvPosition.z); // 600: stars sit at 200–350
+    gl_PointSize = aSize * (uScale / -mvPosition.z);
     gl_Position = projectionMatrix * mvPosition;
   }
 `;

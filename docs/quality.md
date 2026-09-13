@@ -7,7 +7,7 @@ Renders at the right cost for the device — not a shrunken desktop. Lives in
 | | `high` | `balanced` | `performance` |
 |--|--------|------------|---------------|
 | pixelRatioCap | 2 | 1.75 | 1.5 |
-| starCount | 12,000 | 8,000 | 5,000 |
+| starCount | 20,000 | 13,000 | 8,500 |
 | sphere segs (earth/moon/sun) | 128/96/96 | 96/64/64 | 64/48/48 |
 | bloom | on (0.7 / 0.5 / 1.25) | on (0.55 / 0.4 / 1.3) | **off** |
 | msaaSamples | 4 | 0 | 0 |

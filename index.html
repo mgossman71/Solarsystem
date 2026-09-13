@@ -586,6 +586,7 @@
       <button class="ui-btn" data-focus="moon" aria-pressed="false">Moon</button>
       <button class="ui-btn" data-focus="sun" aria-pressed="false">Sun</button>
       <button class="ui-btn" data-focus="system" aria-pressed="false">System</button>
+      <button class="ui-btn" data-focus="saturn" aria-pressed="false" title="Fly to Saturn and its rings">Saturn</button>
     </div>
     <div class="pb-divider"></div>
     <div class="pb-group">
@@ -654,7 +655,19 @@
   </div>
   <div class="focus-panel" id="focus-panel">
     <div class="focus-row">
-      <span class="focus-label">Moon Orbit</span>
+      <span class="focus-label">Moons</span>
+      <div class="seg-group">
+        <button class="seg-btn" data-focus="mimas">Mimas</button>
+        <button class="seg-btn" data-focus="enceladus">Enceladus</button>
+        <button class="seg-btn" data-focus="tethys">Tethys</button>
+        <button class="seg-btn" data-focus="dione">Dione</button>
+        <button class="seg-btn" data-focus="rhea">Rhea</button>
+        <button class="seg-btn" data-focus="titan">Titan</button>
+        <button class="seg-btn" data-focus="iapetus">Iapetus</button>
+      </div>
+    </div>
+    <div class="focus-row">
+      <span class="focus-label">Orbit</span>
       <div class="seg-group">
         <button class="seg-btn" data-orbit="paused">Paused</button>
         <button class="seg-btn active" data-orbit="visualized">Visualized</button>
@@ -698,10 +711,23 @@
           <button class="seg-btn" data-focus="moon">Moon</button>
           <button class="seg-btn" data-focus="sun">Sun</button>
           <button class="seg-btn" data-focus="system">System</button>
+          <button class="seg-btn" data-focus="saturn">Saturn</button>
         </div>
       </section>
       <section class="sheet-section">
-        <h3>Moon Orbit</h3>
+        <h3>Saturn Moons</h3>
+        <div class="seg-group sheet-seg">
+          <button class="seg-btn" data-focus="mimas">Mimas</button>
+          <button class="seg-btn" data-focus="enceladus">Enceladus</button>
+          <button class="seg-btn" data-focus="tethys">Tethys</button>
+          <button class="seg-btn" data-focus="dione">Dione</button>
+          <button class="seg-btn" data-focus="rhea">Rhea</button>
+          <button class="seg-btn" data-focus="titan">Titan</button>
+          <button class="seg-btn" data-focus="iapetus">Iapetus</button>
+        </div>
+      </section>
+      <section class="sheet-section">
+        <h3>Orbit</h3>
         <div class="seg-group sheet-seg">
           <button class="seg-btn" data-orbit="paused">Paused</button>
           <button class="seg-btn active" data-orbit="visualized">Visualized</button>

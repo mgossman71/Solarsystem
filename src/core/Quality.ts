@@ -4,11 +4,14 @@
 // Renders at the right cost for the device — not a shrunken desktop.
 //
 // Tiers (settings actually applied to the renderer):
-//   high        — full pixel ratio (≤2), 12k stars, full MSAA + bloom,
+//   high        — full pixel ratio (≤2), 20k stars, full MSAA + bloom,
 //                 high-res texture set, dense sphere tessellation.
-//   balanced    — 1.75 pixel-ratio cap, 8k stars, no MSAA, softer bloom,
+//   balanced    — 1.75 pixel-ratio cap, 13k stars, no MSAA, softer bloom,
 //                 1k texture set (still real NASA/SDO imagery).
-//   performance — 1.5 pixel-ratio cap, 5k stars, no bloom at all, 1k set.
+//   performance — 1.5 pixel-ratio cap, 8.5k stars, no bloom at all, 1k set.
+// Star COUNTS are fixed per tier; the per-star SIZE (not the count) tracks the
+// star-shell radius (StarField.ts / sceneScale.ts), so moving the band keeps
+// the sky the same density and brightness.
 //
 // `auto` (default) resolves to a tier at startup from measurable signals —
 // pointer type, viewport size, hardware concurrency, memory, GPU renderer
@@ -45,7 +48,7 @@ export const QUALITY_PROFILES: Record<QualityTier, QualityProfile> = {
   high: {
     tier: 'high',
     pixelRatioCap: 2,
-    starCount: 12000,
+    starCount: 20000,
     sphereSegments: { earth: [128, 64], cloud: [96, 48], atmosphere: [64, 32], moon: [96, 48], sun: [96, 96] },
     bloom: { enabled: true, strength: 0.7, radius: 0.5, threshold: 1.25 },
     msaaSamples: 4,
@@ -56,7 +59,7 @@ export const QUALITY_PROFILES: Record<QualityTier, QualityProfile> = {
   balanced: {
     tier: 'balanced',
     pixelRatioCap: 1.75,
-    starCount: 8000,
+    starCount: 13000,
     sphereSegments: { earth: [96, 48], cloud: [64, 32], atmosphere: [48, 24], moon: [64, 32], sun: [64, 64] },
     bloom: { enabled: true, strength: 0.55, radius: 0.4, threshold: 1.3 },
     msaaSamples: 0,
@@ -67,7 +70,7 @@ export const QUALITY_PROFILES: Record<QualityTier, QualityProfile> = {
   performance: {
     tier: 'performance',
     pixelRatioCap: 1.5,
-    starCount: 5000,
+    starCount: 8500,
     sphereSegments: { earth: [64, 32], cloud: [48, 24], atmosphere: [32, 16], moon: [48, 24], sun: [48, 48] },
     bloom: { enabled: false, strength: 0, radius: 0, threshold: 1.3 },
     msaaSamples: 0,
@@ -150,16 +153,32 @@ export function detectAutoTier(): QualityTier {
   const isMobile = coarse && smallScreen;
 
   const cores = navigator.hardwareConcurrency ?? 8;
-  const mem = (navigator as unknown as { deviceMemory?: number }).deviceMemory ?? 8;
+  // Safari and a few other mobile engines do NOT expose deviceMemory — the
+  // `?? 8` fallback is optimistic (an assumption), not a measurement.
+  const rawMem = (navigator as unknown as { deviceMemory?: number }).deviceMemory;
+  const mem = rawMem ?? 8;
+  const memKnown = rawMem != null;
 
   // Integrated / low-end GPU families (case-insensitive match on the unmasked
   // renderer string — measurable hardware, not a browser claim).
   const gpu = gpuRendererString();
+  // Weak-GPU families: explicit legacy names only. Modern Apple silicon
+  // reports a generic "Apple GPU" string that is IDENTICAL across A8…M4 —
+  // the vendor string cannot tell a 2015 A8 from a 2025 M4, so Apple
+  // hardware is never downgraded on the string alone (the cores/mem signals
+  // below handle real low-end Apple devices).
   const weakGpu =
-    /adreno (a[12]\d{2}|[12]0[0-9])|^mali (400|450|t6|t720)|apple gpu/i.test(gpu);
+    /adreno (a[12]\d{2}|[12]0[0-9])|^mali (400|450|t6|t720)/i.test(gpu);
 
   if (isMobile) {
     if (weakGpu || cores <= 3 || mem <= 3) return 'performance';
+    // No usable memory signal on mobile (the Safari / `mem ?? 8` case) with a
+    // modest core count: don't assume the optimistic balanced tier (bloom +
+    // 13k stars). The runtime FPS guard only ever steps DOWN, so a genuinely
+    // fast phone is at worst briefly under-provisioned — safer than starting
+    // high and thermally throttling mid-session. Flagship core counts (and
+    // tablets) still keep balanced.
+    if (!memKnown && cores <= 6) return 'performance';
     return 'balanced';
   }
   if (weakGpu && cores <= 4 && mem <= 4) return 'balanced';
