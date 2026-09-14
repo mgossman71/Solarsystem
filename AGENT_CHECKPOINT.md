@@ -40,7 +40,6 @@ Build a cinematic, interactive 3D Earth experience in the browser using Three.js
 | `package.json` | Dependencies and scripts |
 | `public/assets/earth/earth-day-albedo.jpg` | Day texture (2048x1024, unlit evenly-illuminated albedo map) |
 | `public/assets/earth/earth-night.jpg` | Night lights texture (4096x2048) |
-| `public/assets/earth/earth-topology.png` | Bump/topography map (2048x1024) |
 | `public/assets/earth/earth-clouds.png` | Cloud layer (2048x1024, white+alpha palette; only the alpha channel is sampled) |
 
 ## Assets
@@ -49,7 +48,6 @@ Build a cinematic, interactive 3D Earth experience in the browser using Three.js
 |------|-----------|--------|---------|
 | `earth-day-albedo.jpg` | 2048x1024 | Solar System Scope 2k earth daymap (unlit albedo) | Free to use |
 | `earth-night.jpg` | 4096x2048 | three-globe npm (NASA night lights) | Public domain / NASA |
-| `earth-topology.png` | 2048x1024 | three-globe npm (topography) | Public domain |
 | `earth-clouds.png` | 2048x1024 (recompressed from 4096x2048; alpha-only data) | turban/webgl-earth (GitHub) | Public domain |
 
 All textures are equirectangular (2:1 aspect), correctly oriented (north up), no mirroring issues.
@@ -88,7 +86,8 @@ Running `npm run dev` opens a full-screen 3D scene:
 
 ## Known Issues
 
-- Bump map loaded but not sampled in fragment shader (visual impact minimal at this scale)
+- No bump/topography map is shipped — Earth **and** Moon derive surface relief from
+  albedo luminance (bright = high) in the fragment shader (see `ASSETS.md`)
 - Ocean specular uses color heuristic (not dedicated water mask texture)
 - Initial rotation is approximate — exact continent facing depends on texture UV mapping
 
