@@ -32,7 +32,16 @@ src/
     sceneScale.ts          # ALL sizes/distances (SUN_*, MOON_*, STAR_*, INITIAL_SUN_*, wrapAzimuth)
     camera.ts              # FOV/near/far, initial pose, OrbitControls defaults, settle timing
     mobile.ts              # prefersReducedMotion()
-  saturn/                  # Saturn cinematic for the Earth view (planet + rings + 7 moons)
+  saturn/ → REMOVED — replaced by planets/
+  planets/                 # EVERY planet: generic PlanetSystem class + registry
+    registry.ts            #   NASA/JPL data for 8 planets + 21 moons, scale/clock
+                           #   helpers, lookups (PLANETS, MOON_OWNER, …)
+    PlanetSystem.ts        #   planet body + optional rings + moons: setup, lazy
+                           #   texture loading, per-frame update, scale/quality swaps
+    shaders/
+      planet.ts            #   generalized planet surface (day/night, oblateness, limb)
+      haze.ts              #   atmospheric-shell moon (Titan)
+      rings.ts             #   ring annulus (radius + moon-count parameterized)
 assets / public assets/    # real satellite imagery (see ASSETS.md)
 scripts/                   # python texture/verify helpers + lighting_math_test.mjs
 docs/                      # feature documentation (earth/moon/sun/camera/quality/ui)
@@ -53,6 +62,7 @@ main.ts
        │    │     └─ cloud map (background load)
        │    ├─ Atmosphere + shader   (earth/shaders/atmosphere.ts)
        │    ├─ createMoon(loader)    (moon/shaders/moon.ts)
+       │    ├─ PlanetSystem ×8       (planets/PlanetSystem.ts; Saturn eager, rest lazy)
        │    └─ createStarField()     (earth/StarField.ts + starfield shader)
        ├─ setupUI() / setupSheet() / setupSunUI()   (index.html DOM)
        ├─ bindSelection()            (raycast hit-proxies)
@@ -61,7 +71,7 @@ main.ts
             ├─ auto-rotate + cloud UV drift
             ├─ sun mode (manual/auto/full-daylight) -> placeSun()
             ├─ moon advance + updateMoonTransform() + sunDirectionToward() (moon phase)
-            ├─ saturn? → .update(dt)
+            ├─ for sys of this.planets → sys.update(dt)
             ├─ updateMoonLabel() + updateHitProxies()
             └─ composer.render()
 ```
@@ -77,6 +87,8 @@ main.ts
 | Earth/Cloud/Atmo/Star/Moon/Sun **shaders** | `*/shaders/*.ts` | one file per concern |
 | Star backdrop | `earth/StarField.ts` | pure factory |
 | Everything interactive + lifecycle | `earth/EarthScene.ts` | the orchestrator |
+| Planet/moon **data + helpers** | `planets/registry.ts` | pure data, no scene |
+| Planet/moon **object system** | `planets/PlanetSystem.ts` | one class for all 8 planets |
 | Moon/Sun/Earth **object classes** | (next increment) | see checkpoint |
 
 ## Invariants / coupling to respect

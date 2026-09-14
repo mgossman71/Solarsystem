@@ -18,7 +18,7 @@ import {
   resolveProfile,
 } from '../core/Quality';
 import { CameraPose, Focus, OrbitMode, ScaleMode } from '../core/types';
-import { isSaturnFocus, isSaturnMoonFocus } from '../core/types';
+import { isPlanetFocus, isPlanetMoonFocus } from '../core/types';
 import {
   INITIAL_MOON_ANGLE,
   INITIAL_SUN_AZIMUTH,
@@ -49,8 +49,12 @@ import { earthVertexShader, earthFragmentShader } from '../earth/shaders/earth';
 import { cloudVertexShader, cloudFragmentShader } from '../earth/shaders/cloud';
 import { atmosphereVertexShader, atmosphereFragmentShader } from '../earth/shaders/atmosphere';
 import { moonVertexShader, moonFragmentShader } from '../moon/shaders/moon';
-import { SaturnSystem } from '../saturn/SaturnSystem';
-import { RING_OUTER, SATURN_MOONS, SATURN_RADIUS, saturnMoonRadius } from '../saturn/config';
+import { PlanetSystem } from '../planets/PlanetSystem';
+import {
+  MOON_OWNER, PLANETS, PLANET_BY_ID,
+  planetFrameRadius, planetMoonRadius, planetRadius,
+  type MoonDef, type PlanetDef,
+} from '../planets/registry';
 
 // ============================================================
 // SHARED TYPES & SCENE SCALE (extracted into focused modules)
@@ -157,8 +161,8 @@ export class EarthScene {
   // ------------------------------------------------------------
   private moonMesh: THREE.Mesh | null = null;
   private moonMaterial: THREE.ShaderMaterial | null = null;
-  /** Saturn system (planet + rings + 7 moons) — see `src/saturn/`. */
-  private saturn: SaturnSystem | null = null;
+  /** All eight planet systems (planet + optional rings + moons) — see `src/planets/`. */
+  private planets = new Map<Focus, PlanetSystem>();
   private moonAngle = INITIAL_MOON_ANGLE;
   /** Live Moon world position (Earth sits at the origin). */
   readonly moonPosition = new THREE.Vector3();
@@ -184,10 +188,12 @@ export class EarthScene {
    * System view. Material is invisible (renderer skips it) but raycastable,
    * so they never draw anything.
    */
-  private hitProxies: { mesh: THREE.Mesh; focus: Focus; saturnIndex?: number }[] = [];
+  private hitProxies: { mesh: THREE.Mesh; focus: Focus }[] = [];
 
   // Textures created in loadEarth — material.dispose() does NOT dispose them.
   private textures: THREE.Texture[] = [];
+  /** Shared texture loader — planet systems lazy-load their maps through it. */
+  private loader: THREE.TextureLoader | null = null;
 
   private showSunRay = false;
 
@@ -280,8 +286,8 @@ export class EarthScene {
     const focusParam = params.get('focus');
     if (
       focusParam === 'earth' || focusParam === 'moon' || focusParam === 'sun' ||
-      focusParam === 'system' || focusParam === 'saturn' ||
-      isSaturnMoonFocus(focusParam as Focus)
+      focusParam === 'system' ||
+      isPlanetFocus(focusParam as Focus) || isPlanetMoonFocus(focusParam as Focus)
     ) {
       // Defer every non-default focus until its body exists: loadEarth applies
       // it through setFocus, which checks isFocusReady(). Do NOT assign
@@ -611,18 +617,24 @@ export class EarthScene {
     // (loads non-blocking; a neutral placeholder occupies the slot first).
     this.createMoon(loader);
 
-    // Saturn system — structure exists immediately (neutral placeholders),
-    // textures stream in after first paint (see loadEarth kick-off).
-    this.saturn = new SaturnSystem(
-      this.scene,
-      this.quality!,
-      Math.min(8, this.renderer.capabilities.getMaxAnisotropy()),
-      (t) => this.textures.push(t),
-    );
-    if (this.pendingDebugMode != null) this.saturn.setDebugMode(this.pendingDebugMode);
-    // Saturn textures — deliberately NOT in the first-paint asset overlay
-    // (the system's neutral placeholders are correct until each map lands).
-    void this.saturn.load(loader);
+    // Planet systems — all eight exist immediately (cheap: placeholder
+    // geometry), so Explore buttons and picking always work. Textures are
+    // deliberately NOT in the first-paint asset overlay (the systems'
+    // neutral placeholders are correct until each map lands): Saturn loads
+    // at startup; the rest load on first focus (see setFocus).
+    this.loader = loader;
+    for (const def of PLANETS) {
+      const sys = new PlanetSystem(
+        this.scene,
+        def,
+        this.quality!,
+        Math.min(8, this.renderer.capabilities.getMaxAnisotropy()),
+        (t) => this.textures.push(t),
+      );
+      this.planets.set(def.id, sys);
+      if (this.pendingDebugMode != null) sys.setDebugMode(this.pendingDebugMode);
+      if (def.eager) void sys.load(loader);
+    }
 
     // Star background
     this.starField = createStarField(this.scene, this.quality!.starCount);
@@ -895,6 +907,13 @@ export class EarthScene {
   private setupUI(): void {
     // Single delegated handler — survives any responsive re-parenting.
     document.body.addEventListener('click', this.uiHandler, { signal: this.ac.signal });
+
+    // Moon pickers (desktop focus panel + mobile sheet): generate the
+    // buttons from the registry; visibility follows the focused planet.
+    const focusMoons = document.querySelector('#focus-moons') as HTMLElement | null;
+    const sheetMoons = document.querySelector('#sheet-moons') as HTMLElement | null;
+    if (focusMoons) this.buildMoonPicker(focusMoons);
+    if (sheetMoons) this.buildMoonPicker(sheetMoons);
 
     // Initial sync pass: URL params (?clouds=0, ?atmosphere=0, ?rotate=0) may
     // have changed the state before this ran — reflect it in the button
@@ -1194,7 +1213,7 @@ export class EarthScene {
       this.swapGeometry(this.atmosphereMesh, new THREE.SphereGeometry(1.08, seg.atmosphere[0], seg.atmosphere[1]));
       this.swapGeometry(this.moonMesh, new THREE.SphereGeometry(MOON_RADIUS, seg.moon[0], seg.moon[1]));
       if (this.sunMesh) this.swapGeometry(this.sunMesh, new THREE.SphereGeometry(SUN_RADIUS, seg.sun[0], seg.sun[1]));
-      if (this.saturn) this.saturn.swapSegments(seg);
+      for (const sys of this.planets.values()) sys.swapSegments(seg);
     }
 
     // 6) Texture set — load the other set on demand, then swap into uniforms.
@@ -1352,10 +1371,17 @@ export class EarthScene {
     if (this.focus === 'sun') return out.copy(this.sunWorldPos);
     if (this.focus === 'moon') return out.copy(this.moonPosition);
     if (this.focus === 'system') return out.copy(this.moonPosition).multiplyScalar(0.5);
-    if (this.saturn) {
-      if (this.focus === 'saturn') return this.saturn.center(out);
-      // (Writing into `out` directly is safe: copy-on-self is a no-op.)
-      return this.saturn.moonWorld(this.focus, out) ?? out.copy(this._origin);
+    if (isPlanetFocus(this.focus)) {
+      const sys = this.planets.get(this.focus);
+      if (sys) return sys.center(out);
+    }
+    if (isPlanetMoonFocus(this.focus)) {
+      const owner = MOON_OWNER[this.focus];
+      const sys = owner ? this.planets.get(owner) : null;
+      if (sys) {
+        // (Writing into `out` directly is safe: copy-on-self is a no-op.)
+        return sys.moonWorld(this.focus, out) ?? out.copy(this._origin);
+      }
     }
     return out.copy(this._origin);
   }
@@ -1426,8 +1452,9 @@ export class EarthScene {
         maxDistance: SUN_DISTANCE * 1.2, // pull back until Earth fits too
       };
     }
-    if (focus === 'saturn') {
-      const target = this.saturn!.center(this._v).clone();
+    if (isPlanetFocus(focus)) {
+      const sys = this.planets.get(focus)!;
+      const target = sys.center(this._v).clone();
       const dir = this._v.copy(this.camera.position).sub(target);
       if (dir.lengthSq() < 1e-8) dir.set(0, 0.25, 1);
       dir.normalize();
@@ -1439,18 +1466,21 @@ export class EarthScene {
       const sunDir = this._moonDir.copy(this.sunWorldPos).sub(target).normalize();
       const facing = dir.dot(sunDir);
       if (facing < 0.35) dir.addScaledVector(sunDir, (0.35 - facing) / 0.65).normalize();
-      // Frame the FULL ring span (not just the planet body) on any aspect.
-      const dist = Math.max(this.fitDistance(RING_OUTER, 0, 1.15), SATURN_RADIUS * 1.6);
+      // Frame the FULL ring span (Saturn) or body (the rest) on any aspect.
+      const dist = Math.max(this.fitDistance(planetFrameRadius(sys.def), 0, 1.15),
+                            planetRadius(sys.def) * 1.6);
       return {
         position: target.clone().addScaledVector(dir, dist),
         target,
-        minDistance: SATURN_RADIUS * 1.35, // just above the oblate equator
+        minDistance: planetRadius(sys.def) * 1.35, // just above the oblate equator
         maxDistance: dist * 3,
       };
     }
-    if (this.saturn && isSaturnMoonFocus(focus)) {
-      const mw = this.saturn.moonWorld(focus, this._v);
-      if (mw) {
+    if (isPlanetMoonFocus(focus)) {
+      const owner = MOON_OWNER[focus];
+      const sys = owner ? this.planets.get(owner) : null;
+      const mw = sys?.moonWorld(focus, this._v);
+      if (sys && mw) {
         const target = mw.clone();
         const dir = this._v.copy(this.camera.position).sub(target);
         if (dir.lengthSq() < 1e-8) dir.set(0, 0.25, 1);
@@ -1459,7 +1489,7 @@ export class EarthScene {
         const sunDir = this._moonDir.copy(this.sunWorldPos).sub(target).normalize();
         const facing = dir.dot(sunDir);
         if (facing < 0.35) dir.addScaledVector(sunDir, (0.35 - facing) / 0.65).normalize();
-        const r = this.saturn.moonRadius(focus) ?? 0.4;
+        const r = sys.moonRadius(focus) ?? 0.4;
         const dist = Math.max(r * 1.9, this.fitDistance(r, 0, 1.3));
         return {
           position: target.clone().addScaledVector(dir, dist),
@@ -1505,9 +1535,14 @@ export class EarthScene {
     if (focus === 'earth') required = this.fitDistance(1.08, 0, margin);
     else if (focus === 'moon') required = this.fitDistance(MOON_RADIUS, 0, margin * 1.1);
     else if (focus === 'sun') required = this.fitDistance(SUN_RADIUS * 2.75, 0, margin * 1.05);
-    else if (focus === 'saturn') required = this.fitDistance(RING_OUTER, 0, margin * 1.1);
-    else if (this.saturn && isSaturnMoonFocus(focus)) {
-      const r = this.saturn.moonRadius(focus) ?? 0.4;
+    else if (isPlanetFocus(focus)) {
+      const sys = this.planets.get(focus);
+      required = this.fitDistance(sys ? planetFrameRadius(sys.def) : 20, 0, margin * 1.1);
+    }
+    else if (isPlanetMoonFocus(focus)) {
+      const owner = MOON_OWNER[focus];
+      const sys = owner ? this.planets.get(owner) : null;
+      const r = sys?.moonRadius(focus) ?? 0.4;
       required = this.fitDistance(r, 0, margin * 1.3);
     }
     else required = this.fitDistance(this.orbitRadius() * 0.5 + MOON_RADIUS, 0, margin * 1.1);
@@ -1570,6 +1605,36 @@ export class EarthScene {
       h.classList.toggle('active', h.dataset.focus === active);
       h.setAttribute('aria-pressed', String(h.dataset.focus === active));
     });
+    // Moon pickers: show only the moons of the planet we are looking at
+    // (focused planet, or the owner of the focused moon).
+    const owner = isPlanetFocus(active) ? active
+      : isPlanetMoonFocus(active) ? MOON_OWNER[active]
+      : null;
+    const row = document.querySelector('#focus-moons');
+    if (row) (row.closest('.focus-row') as HTMLElement | null)?.setAttribute('hidden', String(owner == null));
+    const section = document.querySelector('#sheet-moons-section');
+    if (section) section.setAttribute('hidden', String(owner == null));
+    document.querySelectorAll('[data-moon-owner]').forEach((el) => {
+      (el as HTMLElement).hidden = owner == null || (el as HTMLElement).dataset.moonOwner !== owner;
+    });
+  }
+
+  /** Populate a moon button group (desktop panel / mobile sheet) from the
+   *  registry — every moon of every planet, tagged with its owner so
+   *  `syncFocusUI` can show just the relevant set. */
+  private buildMoonPicker(container: HTMLElement): void {
+    container.innerHTML = '';
+    for (const def of PLANETS) {
+      for (const m of def.moons) {
+        const b = document.createElement('button');
+        b.className = 'seg-btn';
+        b.dataset.focus = m.id;
+        b.dataset.moonOwner = def.id;
+        b.textContent = m.name;
+        b.hidden = true; // revealed by syncFocusUI when the owner is focused
+        container.appendChild(b);
+      }
+    }
   }
 
   /** True once the body behind `f` has been built (Earth/Sun exist before
@@ -1577,7 +1642,9 @@ export class EarthScene {
   private isFocusReady(f: Focus): boolean {
     if (f === 'earth' || f === 'sun') return true;
     if (f === 'moon' || f === 'system') return this.moonMesh != null;
-    return isSaturnFocus(f) && this.saturn != null;
+    if (isPlanetFocus(f)) return this.planets.has(f);
+    if (isPlanetMoonFocus(f)) return this.planets.has(MOON_OWNER[f]);
+    return false;
   }
 
   /**
@@ -1600,11 +1667,17 @@ export class EarthScene {
     this.pendingFocus = null;
     this.focus = f;
     this.syncFocusUI();
+    // First focus on a planet: start loading its texture set (idempotent —
+    // the placeholder is a correct neutral until the real maps land).
+    if (this.loader) {
+      const owner = isPlanetFocus(f) ? f : isPlanetMoonFocus(f) ? MOON_OWNER[f] : null;
+      if (owner) this.planets.get(owner)?.load(this.loader);
+    }
     this.animateCameraTo(this.computeFocusPose(f));
   }
 
   private setMoonOrbit(mode: OrbitMode): void {
-    this.moonOrbit = mode; // Saturn reads the same mode from its per-frame params
+    this.moonOrbit = mode; // planets read the same mode from their per-frame params
     document.querySelectorAll('[data-orbit]').forEach((el) => {
       const h = el as HTMLElement;
       h.classList.toggle('active', h.dataset.orbit === mode);
@@ -1616,7 +1689,7 @@ export class EarthScene {
     if (mode === this.scaleMode) return;
     this.scaleMode = mode;
     this.updateMoonTransform();
-    this.saturn?.applyScaleMode(mode);
+    for (const sys of this.planets.values()) sys.applyScaleMode(mode);
     document.querySelectorAll('[data-scale]').forEach((el) => {
       const h = el as HTMLElement;
       h.classList.toggle('active', h.dataset.scale === mode);
@@ -1673,11 +1746,11 @@ export class EarthScene {
    */
   private createHitProxies(): void {
     const material = new THREE.MeshBasicMaterial({ visible: false });
-    const make = (radius: number, focus: Focus, saturnIndex?: number): { mesh: THREE.Mesh; focus: Focus; saturnIndex?: number } => {
+    const make = (radius: number, focus: Focus): { mesh: THREE.Mesh; focus: Focus } => {
       const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 12, 8), material);
       mesh.visible = false; // updated by updateHitProxies(); raycast ignores visible
       this.scene.add(mesh);
-      return { mesh, focus, saturnIndex };
+      return { mesh, focus };
     };
     const earth = make(1.15, 'earth');
     earth.mesh.position.set(0, 0, 0);
@@ -1688,27 +1761,27 @@ export class EarthScene {
     this.hitProxies.push(sun);
     const moon = make(0.5, 'moon');
     this.hitProxies.push(moon);
-    // Saturn + its moons (world space, tracked per frame in updateHitProxies)
-    const saturn = make(SATURN_RADIUS * 1.3, 'saturn');
-    this.hitProxies.push(saturn);
-    for (let i = 0; i < SATURN_MOONS.length; i++) {
-      const def = SATURN_MOONS[i];
-      // Unit sphere: the pick radius is applied as a per-frame scale in
-      // updateHitProxies() so it stays scale-mode-aware (in Real scale the
-      // true moon radii are 7–25× smaller than exploration-size pick spheres).
-      const proxy = make(1, def.id as Focus, i);
-      proxy.mesh.scale.setScalar(this.saturnMoonPickRadius(def, this.scaleMode));
-      this.hitProxies.push(proxy);
+    // Planets + their moons (world space, tracked per frame in updateHitProxies)
+    for (const def of PLANETS) {
+      this.hitProxies.push(make(planetRadius(def) * 1.3, def.id));
+      for (const m of def.moons) {
+        // Unit sphere: the pick radius is applied as a per-frame scale in
+        // updateHitProxies() so it stays scale-mode-aware (in Real scale the
+        // true moon radii are 7–25× smaller than exploration-size pick spheres).
+        const proxy = make(1, m.id as Focus);
+        proxy.mesh.scale.setScalar(this.planetMoonPickRadius(m, def, this.scaleMode));
+        this.hitProxies.push(proxy);
+      }
     }
   }
 
-  /** Pick radius for a Saturn moon in the active scale mode. Exploration:
+  /** Pick radius for a planet moon in the active scale mode. Exploration:
    *  generous (≥ 0.8, ~1.6× the exploration size) so a finger tap lands.
    *  Real: capped at ~2.5× the TRUE radius so a tap clearly aimed at empty
-   *  space can't select a 0.03-unit Mimas (a fixed 0.8 floor would be
+   *  space can't select a 0.001-unit Phobos (a fixed 0.8 floor would be
    *  7–25× its rendered size). */
-  private saturnMoonPickRadius(def: (typeof SATURN_MOONS)[number], mode: ScaleMode): number {
-    const r = saturnMoonRadius(def, mode);
+  private planetMoonPickRadius(def: MoonDef, planet: PlanetDef, mode: ScaleMode): number {
+    const r = planetMoonRadius(def, planet, mode);
     return mode === 'real' ? Math.max(0.2, r * 2.5) : Math.max(0.8, r * 1.6);
   }
 
@@ -1722,24 +1795,32 @@ export class EarthScene {
       } else if (p.focus === 'moon') {
         p.mesh.visible = this.moonMesh != null;
         if (this.moonMesh) p.mesh.position.copy(this.moonPosition);
-      } else if (isSaturnFocus(p.focus)) {
-        // Saturn proxies are only useful when we're actually there.
-        if (!this.saturn) { p.mesh.visible = false; continue; }
-        const here = isSaturnFocus(this.focus);
-        if (p.focus === 'saturn') {
-          p.mesh.visible = here;
-          if (here) this.saturn.center(p.mesh.position);
-        } else {
+      } else if (isPlanetFocus(p.focus)) {
+        // Planet proxies are only useful when we're actually there (the
+        // planet itself, or one of its moons).
+        const sys = this.planets.get(p.focus);
+        if (!sys) { p.mesh.visible = false; continue; }
+        const here = this.focus === p.focus
+          || (isPlanetMoonFocus(this.focus) && MOON_OWNER[this.focus] === p.focus);
+        p.mesh.visible = here;
+        if (here) sys.center(p.mesh.position);
+      } else if (isPlanetMoonFocus(p.focus)) {
+        const owner = MOON_OWNER[p.focus];
+        const sys = this.planets.get(owner);
+        if (!sys) { p.mesh.visible = false; continue; }
+        const here = this.focus === owner
+          || (isPlanetMoonFocus(this.focus) && MOON_OWNER[this.focus] === owner);
+        if (here) {
+          const pdef = PLANET_BY_ID[owner];
+          const mdef = pdef.moons.find((m) => m.id === p.focus);
           // Scale-aware pick radius: the unit sphere is scaled to the active
-          // scale mode's tappable size (see saturnMoonPickRadius).
-          const pick = this.saturnMoonPickRadius(SATURN_MOONS[p.saturnIndex!], this.scaleMode);
+          // scale mode's tappable size (see planetMoonPickRadius).
+          const pick = mdef ? this.planetMoonPickRadius(mdef, pdef, this.scaleMode) : 0.8;
           if (p.mesh.scale.x !== pick) p.mesh.scale.setScalar(pick);
-          p.mesh.visible = here;
-          if (here) {
-            const mw = this.saturn.moonWorld(p.focus, this._v);
-            if (mw) p.mesh.position.copy(mw);
-          }
+          const mw = sys.moonWorld(p.focus, this._v);
+          if (mw) p.mesh.position.copy(mw);
         }
+        p.mesh.visible = here;
       }
     }
   }
@@ -2129,7 +2210,7 @@ export class EarthScene {
       if (this.earthMaterial) this.earthMaterial.uniforms.uDebugMode.value = mode;
       if (this.moonMaterial) this.moonMaterial.uniforms.uDebugMode.value = mode;
       if (this.cloudMaterial) this.cloudMaterial.uniforms.uDebugMode.value = mode;
-      if (this.saturn) this.saturn.setDebugMode(mode);
+      for (const sys of this.planets.values()) sys.setDebugMode(mode);
       // The white-sphere test must render a BARE sphere — hide the cloud
       // shell in mode 3 so it cannot occlude the surface under validation.
       if (this.cloudMesh) {
@@ -2292,10 +2373,10 @@ export class EarthScene {
         this.controls.target.copy(this.focusCenter(this._v));
       }
     }
-    // Saturn: advance its own spin + moon orbits (same orbit/scale modes as
-    // the Earth Moon), shared point-source Sun lighting.
-    if (this.saturn) {
-      this.saturn.update(dt, {
+    // Planets: advance each spin + moon orbit (same orbit/scale modes as the
+    // Earth Moon), shared point-source Sun lighting.
+    for (const sys of this.planets.values()) {
+      sys.update(dt, {
         autoRotate: this.state.autoRotate,
         orbitMode: this.moonOrbit,
         scaleMode: this.scaleMode,
@@ -2341,9 +2422,9 @@ export class EarthScene {
 
   dispose(): void {
     this.disposed = true;
-    // Saturn system: stop in-flight texture loads from attaching to disposed
-    // materials (its meshes/textures are freed by the shared traverse below).
-    if (this.saturn) this.saturn.markDisposed();
+    // Planet systems: stop in-flight texture loads from attaching to disposed
+    // materials (their meshes/textures are freed by the shared traverse below).
+    for (const sys of this.planets.values()) sys.markDisposed();
     // Remove every DOM listener this class attached (window, document, sheet,
     // sun pad/panel, body click — see the { signal } registrations) in one
     // shot; also lets the detached EarthScene become collectable.

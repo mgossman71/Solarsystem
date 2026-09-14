@@ -17,12 +17,14 @@ import {
 import { STAR_FIELD_RADIUS_MIN, wrapAzimuth } from '../config/sceneScale';
 import { sunDirectionFromAzEl, sunDirectionToward } from '../lighting/SunLighting';
 import {
-  SATURN_MOONS,
-  SATURN_POSITION,
-  saturnMoonOrbit,
-  saturnMoonPeriod,
-  saturnMoonRadius,
-} from '../saturn/config';
+  KM_PER_UNIT,
+  MOON_OWNER,
+  PLANETS,
+  planetMoonOrbit,
+  planetMoonRadius,
+  planetRadius,
+  moonPeriod,
+} from '../planets/registry';
 
 // ---- Vector3 ≈ [x, y, z] helper (keeps the tests readable) ----
 const expectVec = (v: THREE.Vector3, x: number, y: number, z: number): void => {
@@ -89,51 +91,86 @@ describe('sunDirectionToward', () => {
 });
 
 // ------------------------------------------------------------
-// Saturn system config invariants
+// Planet registry invariants
 // ------------------------------------------------------------
-describe('Saturn moon config', () => {
-  it('lists moons in increasing orbit radius (Mimas innermost, Iapetus outermost)', () => {
-    const orbits = SATURN_MOONS.map((m) => m.orbitKm);
-    for (let i = 1; i < orbits.length; i++) {
-      expect(orbits[i]).toBeGreaterThan(orbits[i - 1]);
+describe('planet registry', () => {
+  it('lists eight planets in orbit order with positive radii', () => {
+    expect(PLANETS.map((p) => p.id).join(','))
+      .toBe('mercury,venus,mars,jupiter,saturn,uranus,neptune,pluto');
+    for (const p of PLANETS) {
+      expect(planetRadius(p)).toBeGreaterThan(0);
+      expect(p.position.length).toBeGreaterThanOrEqual(0);
     }
   });
 
-  it('keeps exploration orbits between the rings and within a sane band', () => {
-    for (const m of SATURN_MOONS) {
-      const explore = saturnMoonOrbit(m, 'explore');
-      expect(explore).toBeGreaterThan(21.2); // outside the A-ring (21.19)
-      expect(explore).toBeLessThanOrEqual(55);
-      // Real scale = the true distance in Earth-radius units.
-      expect(saturnMoonOrbit(m, 'real')).toBeCloseTo(m.orbitKm / 6371, 6);
+  it('maps every moon to its owning planet', () => {
+    for (const p of PLANETS) {
+      for (const m of p.moons) {
+        expect(MOON_OWNER[m.id]).toBe(p.id);
+      }
     }
   });
 
-  it('never renders a moon bigger than Saturn, and floors small moons in explore mode', () => {
-    for (const m of SATURN_MOONS) {
-      expect(saturnMoonRadius(m, 'real')).toBeLessThan(9.46);
-      // The five small moons are floored to 0.32 in explore mode…
-      if (m.id !== 'titan' && m.id !== 'iapetus') {
-        expect(saturnMoonRadius(m, 'explore')).toBe(0.32);
+  it('lists each planet’s moons in increasing orbit radius', () => {
+    for (const p of PLANETS) {
+      const orbits = p.moons.map((m) => m.orbitKm);
+      for (let i = 1; i < orbits.length; i++) {
+        expect(orbits[i]).toBeGreaterThan(orbits[i - 1]);
+      }
+    }
+  });
+
+  it('keeps exploration orbits outside the parent body and within a sane band', () => {
+    for (const p of PLANETS) {
+      for (const m of p.moons) {
+        const explore = planetMoonOrbit(m, 'explore');
+        expect(explore).toBeGreaterThan(planetRadius(p) * 1.2);
+        expect(explore).toBeLessThanOrEqual(55);
+        // Real scale = the true distance in Earth-radius units.
+        expect(planetMoonOrbit(m, 'real')).toBeCloseTo(m.orbitKm / KM_PER_UNIT, 6);
+      }
+    }
+    // Saturn-specific: all exploration orbits sit OUTSIDE the A-ring.
+    const saturn = PLANETS.find((p) => p.id === 'saturn')!;
+    for (const m of saturn.moons) {
+      expect(planetMoonOrbit(m, 'explore')).toBeGreaterThan(saturn.ring!.outer);
+    }
+  });
+
+  it('never renders a moon bigger than its planet, and floors small moons in explore mode', () => {
+    for (const p of PLANETS) {
+      for (const m of p.moons) {
+        expect(planetMoonRadius(m, p, 'real')).toBeLessThan(planetRadius(p));
+        if (m.keepTrueSize) {
+          // True size, but still floored at the planet's small-moon minimum
+          // (e.g. Iapetus on Saturn renders at the 0.32 floor).
+          expect(planetMoonRadius(m, p, 'explore'))
+            .toBeCloseTo(Math.max(m.radiusKm / KM_PER_UNIT, p.moonMinRadius), 6);
+        } else {
+          expect(planetMoonRadius(m, p, 'explore')).toBe(p.moonMinRadius);
+        }
       }
     }
   });
 
   it('derives periods from the sidereal values in the active clock mode', () => {
-    const mimas = SATURN_MOONS[0];
-    expect(saturnMoonPeriod(mimas, 'paused')).toBe(Infinity);
-    expect(saturnMoonPeriod(mimas, 'realtime')).toBeCloseTo(mimas.periodDays * 86400, 6);
-    expect(saturnMoonPeriod(mimas, 'visualized')).toBeCloseTo(mimas.periodDays * 25, 6);
+    const phobos = PLANETS.find((p) => p.id === 'mars')!.moons[0];
+    expect(moonPeriod(phobos, 'paused')).toBe(Infinity);
+    expect(moonPeriod(phobos, 'realtime')).toBeCloseTo(phobos.periodDays * 86400, 6);
+    expect(moonPeriod(phobos, 'visualized')).toBeCloseTo(phobos.periodDays * 25, 6);
   });
 
-  it('keeps the star shell behind the farthest real-scale body (Iapetus)', () => {
+  it('keeps the star shell behind the farthest real-scale body', () => {
     // The shell is the background layer: it must sit beyond EVERY body in BOTH
     // scale modes, else additive stars (which never write depth) render in
-    // front of the outer moons. The farthest body is Iapetus in Real scale —
-    // Saturn's centre (|SATURN_POSITION|) plus its true orbit — so the shell's
-    // inner edge must clear that distance.
-    const iapetus = SATURN_MOONS[SATURN_MOONS.length - 1];
-    const farthestReal = SATURN_POSITION.length() + saturnMoonOrbit(iapetus, 'real');
+    // front of the outer moons.
+    let farthestReal = 0;
+    for (const p of PLANETS) {
+      const posLen = Math.hypot(...p.position);
+      const outerMoon = p.moons.reduce((a, m) => Math.max(a, planetMoonOrbit(m, 'real')), 0);
+      const span = p.ring ? p.ring.outer : 0;
+      farthestReal = Math.max(farthestReal, posLen + Math.max(outerMoon, span));
+    }
     expect(STAR_FIELD_RADIUS_MIN).toBeGreaterThan(farthestReal);
   });
 });

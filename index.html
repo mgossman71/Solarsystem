@@ -586,7 +586,14 @@
       <button class="ui-btn" data-focus="moon" aria-pressed="false">Moon</button>
       <button class="ui-btn" data-focus="sun" aria-pressed="false">Sun</button>
       <button class="ui-btn" data-focus="system" aria-pressed="false">System</button>
+      <button class="ui-btn" data-focus="mercury" aria-pressed="false" title="Fly to Mercury">Mercury</button>
+      <button class="ui-btn" data-focus="venus" aria-pressed="false" title="Fly to Venus">Venus</button>
+      <button class="ui-btn" data-focus="mars" aria-pressed="false" title="Fly to Mars and its two moons">Mars</button>
+      <button class="ui-btn" data-focus="jupiter" aria-pressed="false" title="Fly to Jupiter and its four Galilean moons">Jupiter</button>
       <button class="ui-btn" data-focus="saturn" aria-pressed="false" title="Fly to Saturn and its rings">Saturn</button>
+      <button class="ui-btn" data-focus="uranus" aria-pressed="false" title="Fly to Uranus and its five moons">Uranus</button>
+      <button class="ui-btn" data-focus="neptune" aria-pressed="false" title="Fly to Neptune and Triton">Neptune</button>
+      <button class="ui-btn" data-focus="pluto" aria-pressed="false" title="Fly to Pluto and Charon">Pluto</button>
     </div>
     <div class="pb-divider"></div>
     <div class="pb-group">
@@ -654,17 +661,9 @@
     </div>
   </div>
   <div class="focus-panel" id="focus-panel">
-    <div class="focus-row">
+    <div class="focus-row" id="focus-moons-row">
       <span class="focus-label">Moons</span>
-      <div class="seg-group">
-        <button class="seg-btn" data-focus="mimas">Mimas</button>
-        <button class="seg-btn" data-focus="enceladus">Enceladus</button>
-        <button class="seg-btn" data-focus="tethys">Tethys</button>
-        <button class="seg-btn" data-focus="dione">Dione</button>
-        <button class="seg-btn" data-focus="rhea">Rhea</button>
-        <button class="seg-btn" data-focus="titan">Titan</button>
-        <button class="seg-btn" data-focus="iapetus">Iapetus</button>
-      </div>
+      <div class="seg-group" id="focus-moons"></div>
     </div>
     <div class="focus-row">
       <span class="focus-label">Orbit</span>
@@ -711,20 +710,19 @@
           <button class="seg-btn" data-focus="moon">Moon</button>
           <button class="seg-btn" data-focus="sun">Sun</button>
           <button class="seg-btn" data-focus="system">System</button>
+          <button class="seg-btn" data-focus="mercury">Mercury</button>
+          <button class="seg-btn" data-focus="venus">Venus</button>
+          <button class="seg-btn" data-focus="mars">Mars</button>
+          <button class="seg-btn" data-focus="jupiter">Jupiter</button>
           <button class="seg-btn" data-focus="saturn">Saturn</button>
+          <button class="seg-btn" data-focus="uranus">Uranus</button>
+          <button class="seg-btn" data-focus="neptune">Neptune</button>
+          <button class="seg-btn" data-focus="pluto">Pluto</button>
         </div>
       </section>
-      <section class="sheet-section">
-        <h3>Saturn Moons</h3>
-        <div class="seg-group sheet-seg">
-          <button class="seg-btn" data-focus="mimas">Mimas</button>
-          <button class="seg-btn" data-focus="enceladus">Enceladus</button>
-          <button class="seg-btn" data-focus="tethys">Tethys</button>
-          <button class="seg-btn" data-focus="dione">Dione</button>
-          <button class="seg-btn" data-focus="rhea">Rhea</button>
-          <button class="seg-btn" data-focus="titan">Titan</button>
-          <button class="seg-btn" data-focus="iapetus">Iapetus</button>
-        </div>
+      <section class="sheet-section" id="sheet-moons-section">
+        <h3>Moons</h3>
+        <div class="seg-group sheet-seg" id="sheet-moons"></div>
       </section>
       <section class="sheet-section">
         <h3>Orbit</h3>

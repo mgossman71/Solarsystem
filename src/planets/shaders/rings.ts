@@ -1,30 +1,30 @@
 /**
- * Saturn's rings — a flat annulus rendered with the Cassini-derived radial
+ * Planetary rings — a flat annulus rendered with the Cassini-derived radial
  * alpha strip (`ring-alpha.png`), lit by the shared sun and shaded by the
- * planet's and the moons' shadows.
+ * planet's and the moons' shadows. (Saturn is the only ringed planet in the
+ * scene today; the shader is radius- and moon-count-parameterized so the
+ * other giants can get ring strips without code changes.)
  *
  * UV convention: the annulus is generated with U = 0 at RING_INNER and
  * U = 1 at RING_OUTER; the shader remaps that into the strip's calibrated
- * pixel range [RING_TEX_U0, RING_TEX_U1] and samples at V = 0.5 (the strip
- * is a 1-D radial profile). The texture's RGB carries the per-band albedo
- * and its alpha the opacity — both are used.
+ * pixel range [uRingU0, uRingU1] and samples at V = 0.5 (the strip is a
+ * 1-D radial profile). The texture's RGB carries the per-band albedo and
+ * its alpha the opacity — both are used.
  *
  * Lighting: the ring is effectively infinitely thin, so both faces receive
  * the same sunlight — intensity from |dot(normal, sun)| (small floor to keep
  * the shadowed face from going fully black at grazing angles).
  *
  * Shadows (same ray-cast math as the planet shader):
- *   – Saturn's disk: sharp circular shadow; only where the ray from the
- *     ring point toward the sun hits the planet (ecliptic geometry — the
- *     shadow slides across the rings as the sun's elevation changes).
- *   – Moon transits: a moving disk shadow per moon.
+ *   – planet disk: sharp circular shadow (ecliptic geometry — the shadow
+ *     slides across the rings as the sun's elevation changes).
+ *   – moon transits: a moving disk shadow per moon.
  *
  * Blending: standard alpha, depth-write OFF (thin translucent sheet),
  * depth-TEST on — so the planet and moons correctly occlude the far side of
  * the rings while the near side draws over them.
  */
 import * as THREE from 'three';
-import { RING_INNER, RING_OUTER, RING_SEGMENTS } from '../config';
 
 export const ringVertexShader = /* glsl */ `
   varying vec2 vUv;
@@ -44,17 +44,18 @@ export const ringFragmentShader = /* glsl */ `
   uniform sampler2D uRingMap;
   uniform float uRingU0;
   uniform float uRingU1;
-  uniform vec3 uSunDirection;     // world dir from Saturn center toward the sun
-  uniform vec3 uCenter;           // world position of Saturn's center
+  uniform vec3 uSunDirection;     // world dir from planet center toward the sun
+  uniform vec3 uCenter;           // world position of the planet center
   uniform float uPlanetRadius;    // scene units
-  uniform vec3 uMoons[7];         // world positions (index order = SATURN_MOONS)
+  uniform vec3 uMoons[7];         // world positions (MAX_MOONS slots, padded)
   uniform float uMoonRadii[7];    // scene units
+  uniform int uMoonCount;
 
   varying vec2 vUv;
   varying vec3 vWorldNormal;
   varying vec3 vWorldPosition;
 
-  /** 1.0 = in shadow of Saturn's disk, 0.0 = clear (ray toward the sun). */
+  /** 1.0 = in shadow of the planet disk, 0.0 = clear (ray toward the sun). */
   float planetShadow(vec3 p, vec3 sunDir) {
     vec3 w = uCenter - p;
     float tc = dot(w, sunDir);
@@ -68,6 +69,7 @@ export const ringFragmentShader = /* glsl */ `
   float moonShadow(vec3 p, vec3 sunDir) {
     float s = 1.0;
     for (int i = 0; i < 7; i++) {
+      if (i >= uMoonCount) break;
       vec3 w = uMoons[i] - p;
       float tc = dot(w, sunDir);
       if (tc > 0.0) {
@@ -108,8 +110,12 @@ export const ringFragmentShader = /* glsl */ `
  * Flat annulus generated in the XZ plane (Y up), centered on the origin.
  * U runs 0→1 from inner to outer radius; V = 0.
  */
-export function createRingGeometry(): THREE.BufferGeometry {
-  const n = RING_SEGMENTS;
+export function createRingGeometry(
+  inner: number,
+  outer: number,
+  segments = 256,
+): THREE.BufferGeometry {
+  const n = segments;
   const positions = new Float32Array((n + 1) * 2 * 3);
   const uvs = new Float32Array((n + 1) * 2 * 2);
   const normals = new Float32Array((n + 1) * 2 * 3);
@@ -120,12 +126,12 @@ export function createRingGeometry(): THREE.BufferGeometry {
     const c = Math.cos(t);
     const s = Math.sin(t);
     const base = i * 2;
-    positions[base * 3] = RING_INNER * c;
+    positions[base * 3] = inner * c;
     positions[base * 3 + 1] = 0;
-    positions[base * 3 + 2] = RING_INNER * s;
-    positions[(base + 1) * 3] = RING_OUTER * c;
+    positions[base * 3 + 2] = inner * s;
+    positions[(base + 1) * 3] = outer * c;
     positions[(base + 1) * 3 + 1] = 0;
-    positions[(base + 1) * 3 + 2] = RING_OUTER * s;
+    positions[(base + 1) * 3 + 2] = outer * s;
     uvs[base * 2] = 0; uvs[base * 2 + 1] = 0;
     uvs[(base + 1) * 2] = 1; uvs[(base + 1) * 2 + 1] = 0;
     normals[base * 3 + 1] = 1;

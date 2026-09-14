@@ -16,10 +16,22 @@ same source imagery — the mobile set is a faithful downscale (`scripts/generat
 | `moon/moon-day-1k.jpg` | Moon | 1k | Mobile set. |
 | `sun/sun-4k.jpg` | Sun photosphere | 4k | SDO (high set). |
 | `sun/sun-2k.jpg` | Sun photosphere | 2k | Mobile set. |
-| `saturn/saturn.jpg` | Saturn | — | JPL Cassini/Huygens mosaic — the Earth view's Saturn cinematic (`src/saturn/`). |
-| `saturn/ring-alpha.png` | Saturn rings | 16K | Radial ring alpha strip for the cinematic rings. |
-| `saturn/titan.jpg` | Titan | — | JPL / Cassini. |
+| `saturn/saturn.jpg` | Saturn | — | JPL Cassini/Huygens mosaic. |
+| `saturn/ring-alpha.png` | Saturn rings | 16K | Radial ring alpha strip (1-D profile, V = 0.5). |
+| `saturn/titan.jpg` | Titan | — | JPL / Cassini (legacy location — one level up, not in `moons/`). |
 | `saturn/moons/{mimas,enceladus,tethys,dione,rhea,iapetus}.jpg` | Saturn small moons | — | JPL / Cassini. |
+| `mercury/mercury.jpg` | Mercury | — | JPL / MESSENGER. |
+| `venus/venus.jpg` | Venus | — | JPL (see also `venus-surface.jpg`, unused). |
+| `mars/mars.jpg` | Mars | — | JPL / MRO. |
+| `mars/moons/{phobos,deimos}.jpg` | Mars moons | — | JPL / MRO. |
+| `jupiter/jupiter.jpg` | Jupiter | — | JPL / Juno. |
+| `jupiter/moons/{io,europa,ganymede,callisto}.jpg` | Galilean moons | — | JPL / Juno, Hubble. |
+| `uranus/uranus.jpg` | Uranus | — | JPL / Voyager 2. |
+| `uranus/moons/{miranda,ariel,umbriel,titania,oberon}.jpg` | Uranian moons | — | JPL / Voyager 2. |
+| `neptune/neptune.jpg` | Neptune | — | JPL / Voyager 2. |
+| `neptune/moons/triton.jpg` | Triton | — | JPL / Voyager 2. |
+| `pluto/pluto.jpg` | Pluto | — | JPL / New Horizons. |
+| `pluto/moons/charon.jpg` | Charon | — | JPL / New Horizons. |
 
 > No `earth-topology.png` / bump map is shipped. Earth **and** Moon derive surface relief
 > from their albedo luminance (bright = high), sampled in a tangent basis in the fragment
@@ -47,6 +59,11 @@ on failure, so a missing asset degrades to a real lower-res image instead of fai
   slot first (clouds: 1×1 transparent = "no clouds"; moon: 1×1 grey; sun: procedural
   granulation). A failure degrades gracefully (cloudless Earth / placeholder Moon /
   procedural Sun), never failing the whole load.
+- **Planet systems are NEVER in the first-paint overlay:** all eight `PlanetSystem`
+  structures exist immediately (neutral placeholder albedo), but their textures load
+  lazily — **Saturn at startup** (legacy eager behavior), **every other planet on
+  first focus** (`EarthScene.setFocus` kicks the load). Path resolution lives in
+  `planets/registry.ts` (`planetBodyTexture`, `planetMoonTexture`).
 - The 5 tracked assets feed the loading bar (`trackAsset`, `loadingAssets {total:5}`).
 
 ## Licensing
@@ -56,6 +73,7 @@ on failure, so a missing asset degrades to a real lower-res image instead of fai
 | Cloud map (turban/webgl-earth) | Public domain |
 | Moon (three-globe / NASA) | Public domain / NASA |
 | Sun (SDO) | Public domain (NASA/SDO) |
+| All planets & moons (Cassini, MESSENGER, MRO, Juno, Voyager 2, New Horizons, Hubble) | Public domain (NASA/JPL) |
 
 ## Helper scripts (`scripts/`)
 - `generate_mobile_textures.py` — downscale the high set into the mobile set.

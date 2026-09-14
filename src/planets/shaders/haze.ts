@@ -1,14 +1,15 @@
 /**
- * Titan shader — the grayscale albedo map tinted by its thick orange
- * atmosphere, with a soft limb glow (the hazy shell extends the disk slightly
- * past the solid surface) and a very soft terminator (optically thick haze).
+ * Haze-moon shader — the grayscale albedo map tinted by a thick atmosphere
+ * (Titan's orange smog is the only one in use today), with a soft limb glow
+ * (the hazy shell extends the disk slightly past the solid surface) and a
+ * very soft terminator (optically thick haze).
  *
  * Same world-space lighting convention as the rest of the app; the mesh is
- * rendered ~4% larger than the true body radius (see `SaturnSystem`) to
- * suggest the atmospheric shell without a separate volume.
+ * rendered `shell`% larger than the true body radius (see `PlanetSystem`)
+ * to suggest the atmospheric shell without a separate volume.
  */
 
-export const titanVertexShader = /* glsl */ `
+export const hazeVertexShader = /* glsl */ `
   varying vec2 vUv;
   varying vec3 vWorldNormal;
   varying vec3 vWorldPosition;
@@ -22,10 +23,10 @@ export const titanVertexShader = /* glsl */ `
   }
 `;
 
-export const titanFragmentShader = /* glsl */ `
+export const hazeFragmentShader = /* glsl */ `
   uniform sampler2D uTexture;
-  uniform vec3 uSunDirection;   // world dir from Titan toward the sun
-  uniform vec3 uTint;           // atmospheric orange tint
+  uniform vec3 uSunDirection;   // world dir from the moon toward the sun
+  uniform vec3 uTint;           // atmospheric tint
   uniform vec3 uRimColor;       // hazy limb color
 
   varying vec2 vUv;

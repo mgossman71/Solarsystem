@@ -696,3 +696,32 @@ no double-binding on the Sun panel, sheet drag/snap, mobile vs desktop layouts.
 `state` (focus/scale/orbit/quality + toggles), runs `loadEarth()`, `animate()`, and
 `dispose()` — delegating each body's creation/updates to its module. Every `tsc`+`build`
 green **and** visually verified per step.
+
+## Milestone: Multi-planet system (Saturn-only → all 8 planets)
+
+The `src/saturn/` cinematic was generalized into a config-driven planet system and the
+seven previously removed planets (Mercury, Venus, Mars, Jupiter, Uranus, Neptune, Pluto)
+were re-added with their focusable moons (21 total):
+
+- **`src/planets/registry.ts`** — single source of truth: NASA/JPL radii, tilts,
+  oblateness, fixed world positions (1 unit = 1 Earth radius), moon orbits/periods,
+  ring geometry (Saturn), haze (Titan), and scale/clock helpers
+  (`planetMoonRadius/Orbit`, `moonPeriod`, `planetFrameRadius`, `MOON_OWNER`, …).
+- **`src/planets/PlanetSystem.ts`** — one class for every planet: body (+ oblateness),
+  optional rings, up to `MAX_MOONS` moons with per-moon GLSL uniforms, lazy texture
+  loading (Saturn eager at startup; the rest on first focus), per-frame `update()`,
+  `swapSegments`, `setDebugMode`, `markDisposed`.
+- **`src/planets/shaders/{planet,haze,rings}.ts`** — generalized from `src/saturn/shaders/`.
+- **`src/core/types.ts`** — `Focus` now covers all 8 planets + 21 moons
+  (`PLANET_FOCUS`, `MOON_FOCUS`, `isPlanetFocus`, `isPlanetMoonFocus`).
+- **`src/earth/EarthScene.ts`** — `planets: Map<Focus, PlanetSystem>`; the per-frame
+  loop, hit proxies, framing, scale/debug swaps, and dispose all iterate the map.
+  Moon pickers (desktop panel + mobile sheet) are generated from the registry and
+  shown only for the focused planet.
+- **`index.html`** — Explore bars (desktop + mobile) list all eight planets.
+- **Deleted:** `src/saturn/` (config, system, shaders).
+- **Verified:** `npx tsc --noEmit` clean · `npx vitest run` 18/18 (registry
+  invariants replaced the old Saturn-config tests) · `npm run build` green.
+- **Open (visual, manual):** browser pass per planet — framing, moon orbits, Titan
+  haze, Saturn rings at both scale modes, lazy texture pop-in on first focus,
+  mobile Explore bar overflow (8 planet buttons).
