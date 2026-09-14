@@ -581,19 +581,22 @@
   <!-- Desktop: primary control bar (focus + scene toggles + quality + fullscreen) -->
   <div class="primary-bar" id="primary-bar">
     <div class="pb-group">
-      <span class="pb-label">Explore</span>
-      <button class="ui-btn active" data-focus="earth" aria-pressed="true">Earth</button>
-      <button class="ui-btn" data-focus="moon" aria-pressed="false">Moon</button>
-      <button class="ui-btn" data-focus="sun" aria-pressed="false">Sun</button>
-      <button class="ui-btn" data-focus="system" aria-pressed="false">System</button>
+      <span class="pb-label">Planets</span>
       <button class="ui-btn" data-focus="mercury" aria-pressed="false" title="Fly to Mercury">Mercury</button>
       <button class="ui-btn" data-focus="venus" aria-pressed="false" title="Fly to Venus">Venus</button>
+      <button class="ui-btn active" data-focus="earth" aria-pressed="true">Earth</button>
       <button class="ui-btn" data-focus="mars" aria-pressed="false" title="Fly to Mars and its two moons">Mars</button>
       <button class="ui-btn" data-focus="jupiter" aria-pressed="false" title="Fly to Jupiter and its four Galilean moons">Jupiter</button>
       <button class="ui-btn" data-focus="saturn" aria-pressed="false" title="Fly to Saturn and its rings">Saturn</button>
       <button class="ui-btn" data-focus="uranus" aria-pressed="false" title="Fly to Uranus and its five moons">Uranus</button>
       <button class="ui-btn" data-focus="neptune" aria-pressed="false" title="Fly to Neptune and Triton">Neptune</button>
       <button class="ui-btn" data-focus="pluto" aria-pressed="false" title="Fly to Pluto and Charon">Pluto</button>
+    </div>
+    <div class="pb-group">
+      <span class="pb-label">Earth System</span>
+      <button class="ui-btn" data-focus="moon" aria-pressed="false" title="Fly to the Moon">Moon</button>
+      <button class="ui-btn" data-focus="sun" aria-pressed="false" title="Fly to the Sun">Sun</button>
+      <button class="ui-btn" data-focus="system" aria-pressed="false" title="Frame the whole system">System</button>
     </div>
     <div class="pb-divider"></div>
     <div class="pb-group">
@@ -704,20 +707,25 @@
         </div>
       </section>
       <section class="sheet-section">
-        <h3>Explore</h3>
+        <h3>Planets</h3>
         <div class="seg-group sheet-seg">
-          <button class="seg-btn active" data-focus="earth">Earth</button>
-          <button class="seg-btn" data-focus="moon">Moon</button>
-          <button class="seg-btn" data-focus="sun">Sun</button>
-          <button class="seg-btn" data-focus="system">System</button>
           <button class="seg-btn" data-focus="mercury">Mercury</button>
           <button class="seg-btn" data-focus="venus">Venus</button>
+          <button class="seg-btn active" data-focus="earth">Earth</button>
           <button class="seg-btn" data-focus="mars">Mars</button>
           <button class="seg-btn" data-focus="jupiter">Jupiter</button>
           <button class="seg-btn" data-focus="saturn">Saturn</button>
           <button class="seg-btn" data-focus="uranus">Uranus</button>
           <button class="seg-btn" data-focus="neptune">Neptune</button>
           <button class="seg-btn" data-focus="pluto">Pluto</button>
+        </div>
+      </section>
+      <section class="sheet-section">
+        <h3>Earth System</h3>
+        <div class="seg-group sheet-seg">
+          <button class="seg-btn" data-focus="moon">Moon</button>
+          <button class="seg-btn" data-focus="sun">Sun</button>
+          <button class="seg-btn" data-focus="system">System</button>
         </div>
       </section>
       <section class="sheet-section" id="sheet-moons-section">

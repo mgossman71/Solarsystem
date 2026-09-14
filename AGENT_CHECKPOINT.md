@@ -718,7 +718,8 @@ were re-added with their focusable moons (21 total):
   loop, hit proxies, framing, scale/debug swaps, and dispose all iterate the map.
   Moon pickers (desktop panel + mobile sheet) are generated from the registry and
   shown only for the focused planet.
-- **`index.html`** — Explore bars (desktop + mobile) list all eight planets.
+- **`index.html`** — Explore bars (desktop + mobile) list all eight planets in strict
+  solar order (Mercury → Pluto); Moon/Sun/System live in a separate "Earth System" group.
 - **Deleted:** `src/saturn/` (config, system, shaders).
 - **Verified:** `npx tsc --noEmit` clean · `npx vitest run` 18/18 (registry
   invariants replaced the old Saturn-config tests) · `npm run build` green.
