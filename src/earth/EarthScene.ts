@@ -22,6 +22,7 @@ import { isSaturnFocus, isSaturnMoonFocus } from '../core/types';
 import { SolarSystem } from '../solar/SolarSystem';
 import { PlanetSystem } from '../solar/PlanetSystem';
 import { MilkyWay } from '../solar/MilkyWay';
+import { SimulationClock } from '../astronomy/SimulationClock';
 import {
   INITIAL_MOON_ANGLE,
   INITIAL_SUN_AZIMUTH,
@@ -165,6 +166,10 @@ export class EarthScene {
   /** Full Solar System view (all planets + moons + ephemeris) — see `src/solar/`. */
   private solar: SolarSystem | null = null;
   private planetSystem: PlanetSystem | null = null;
+  /** Shared authoritative clock for BOTH solar views: drilling into a planet's
+   *  system (and back) preserves the simulated epoch instead of resetting to
+   *  J2000. Lives here — not in the views — so it survives view disposal. */
+  private simClock: SimulationClock = new SimulationClock({ mode: 'visualized', daysPerSecond: 7 });
   /** The whole Milky Way (galaxy-level view) — see `src/solar/MilkyWay.ts`. */
   private galaxy: MilkyWay | null = null;
   /** Remembered visibility of the Earth-cinematic bodies while in Solar mode. */
@@ -1151,7 +1156,7 @@ export class EarthScene {
     this.focus = 'earth';
     this.syncFocusUI();
 
-    this.solar = new SolarSystem(this.scene, this.camera, this.controls);
+    this.solar = new SolarSystem(this.scene, this.camera, this.controls, this.simClock);
     this.solar.onExit = () => this.exitSolarSystem();
     this.solar.onEnterSystem = (id) => this.enterPlanetSystem(id);
     this.solar.onEnterGalaxy = () => this.enterMilkyWay();
@@ -1183,7 +1188,7 @@ export class EarthScene {
   private enterPlanetSystem(planetId: string): void {
     if (this.planetSystem) { this.planetSystem.dispose(); this.planetSystem = null; }
     if (this.solar) { this.solar.dispose(); this.solar = null; } // drop the overview (panel + meshes)
-    this.planetSystem = new PlanetSystem(this.scene, this.camera, this.controls, planetId);
+    this.planetSystem = new PlanetSystem(this.scene, this.camera, this.controls, planetId, this.simClock);
     this.planetSystem.onExit = () => {
       this.planetSystem?.dispose();
       this.planetSystem = null;
@@ -1197,7 +1202,7 @@ export class EarthScene {
    *  touch savedVisibility/savedFar (the Earth cinematic is still hidden). */
   private reopenOverview(): void {
     if (this.solar) { this.solar.group.visible = true; this.solar.overview(); return; }
-    this.solar = new SolarSystem(this.scene, this.camera, this.controls);
+    this.solar = new SolarSystem(this.scene, this.camera, this.controls, this.simClock);
     this.solar.onExit = () => this.exitSolarSystem();
     this.solar.onEnterSystem = (id) => this.enterPlanetSystem(id);
     this.solar.onEnterGalaxy = () => this.enterMilkyWay();

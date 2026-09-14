@@ -58,6 +58,15 @@ export interface MoonOrbitElements {
   tidallyLocked: boolean;    // same face to the parent
   retrograde: boolean;       // orbit direction (e.g. Triton)
   radiusKm: number;          // moon mean radius
+  /**
+   * Distance from the parent's centre to the PAIR'S BARYCENTER (km), when the
+   * moon's mass is significant enough that the two bodies genuinely orbit a
+   * shared point instead of the moon circling a fixed parent. The only case
+   * in the system: Pluto–Charon (barycentre 19,102 km from Pluto's centre,
+   * outside Pluto's 1,188 km surface). Undefined → classic moon (barycenter
+   * at the parent's centre).
+   */
+  barycenterKm?: number;
 }
 
 /** Rotation / axial orientation of a body (drives the tilt + spin direction). */
@@ -73,6 +82,9 @@ export interface BodyTextures {
   night?: string;
   clouds?: string;
   ring?: string;
+  /** A second real map layer under `body` (Venus: `body` = visible-light
+   *  cloud deck, `surface` = the radar-mapped terrain beneath it). */
+  surface?: string;
 }
 
 /** A single celestial body in the catalog. */

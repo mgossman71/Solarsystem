@@ -32,6 +32,21 @@ src/
     sceneScale.ts          # ALL sizes/distances (SUN_*, MOON_*, STAR_*, INITIAL_SUN_*, wrapAzimuth)
     camera.ts              # FOV/near/far, initial pose, OrbitControls defaults, settle timing
     mobile.ts              # prefersReducedMotion()
+  astronomy/               # SHARED ASTRONOMY CORE (pure math, framework-agnostic)
+    types.ts               #   CelestialBody, MoonOrbitElements, BodyTextures (body/night/clouds/ring/surface)
+    ReferenceFrames.ts     #   ecliptic ↔ scene frame conversions
+    OrbitalElements.ts     #   Kepler solver, heliocentricEcliptic, moonLocalPosition,
+                           #   barycenterMu / barycenterMoonScale (Pluto–Charon)
+    SimulationClock.ts     #   THE one time source: epochDays since J2000 + speed presets
+    CelestialCatalog.ts    #   centralized data: 9 planets + 22 moons + Sun + Earth Moon
+  solar/                   # SOLAR SYSTEM VIEWS (render + navigate the full system)
+    scale.ts               #   educational/realistic scale models, planet/moon sizing, oblateness()
+    SolarSystem.ts         #   overview: all planets + moons, ephemeris-driven, picking,
+                           #   body/moon/speed panel, "Enter system" / "Milky Way" callbacks
+    PlanetSystem.ts        #   deep view: one planet (tilt, oblateness, rings) + its moons;
+                           #   Pluto barycentre wobble; Venus cloud/surface layer switch
+    MilkyWay.ts            #   galaxy-level view (one level up)
+    __tests__/             #   scale invariants, rings defs, planetSystem helpers
 assets / public assets/    # real satellite imagery (see ASSETS.md)
 scripts/                   # python texture/verify helpers + lighting_math_test.mjs
 docs/                      # feature documentation (earth/moon/sun/camera/quality/ui)
@@ -60,6 +75,9 @@ main.ts
             ├─ auto-rotate + cloud UV drift
             ├─ sun mode (manual/auto/full-daylight) -> placeSun()
             ├─ moon advance + updateMoonTransform() + sunDirectionToward() (moon phase)
+            ├─ saturn? / solar? / planetSystem? / galaxy? → .update(dt)
+            │    └─ ALL read the ONE shared SimulationClock (EarthScene.simClock),
+            │       so the simulated epoch survives view transitions (drill in/out)
             ├─ updateMoonLabel() + updateHitProxies()
             └─ composer.render()
 ```
@@ -76,6 +94,9 @@ main.ts
 | Star backdrop | `earth/StarField.ts` | pure factory |
 | Everything interactive + lifecycle | `earth/EarthScene.ts` | the orchestrator |
 | Moon/Sun/Earth **object classes** | (next increment) | see checkpoint |
+| All orbital math + catalog + clock | `astronomy/*` | pure, testable, no Three.js |
+| Solar System views (overview/planet/galaxy) | `solar/SolarSystem.ts`, `solar/PlanetSystem.ts`, `solar/MilkyWay.ts` | self-contained (meshes + panel + tween); host only shows/hides |
+| Shared simulated epoch | `earth/EarthScene.ts` (`simClock`) | ONE `SimulationClock` passed to both solar views; pause/resume never clobbers the mode |
 
 ## Invariants / coupling to respect
 - `uSunDirection` on Earth/Clouds/Atmosphere is the **same shared vector**

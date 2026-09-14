@@ -115,3 +115,25 @@ export function moonLocalPosition(m: MoonOrbitElements, tDays: number, out: Vec3
   out.z = m.semiMajorAxisKm * (st * si);
   return out;
 }
+
+// ---- Barycenter (massive moons: Pluto–Charon) -----------------------------
+/**
+ * Barycenter mass ratio μ = r_bary / a — the fraction of the moon's orbital
+ * radius that the PARENT's centre sits on the far side of the pair's
+ * barycentre (Pluto–Charon: 19,102 / 19,596 ≈ 0.975 — the barycentre lies
+ * OUTSIDE Pluto's surface, so both bodies genuinely orbit the shared point).
+ * Returns 0 for a classic moon (barycenter at the parent's centre), so callers
+ * can apply the same code path uniformly.
+ */
+export function barycenterMu(m: MoonOrbitElements): number {
+  const r = m.barycenterKm;
+  if (!r || r <= 0 || m.semiMajorAxisKm <= 0) return 0;
+  return Math.min(1, r / m.semiMajorAxisKm);
+}
+
+/** Moon's position-scale relative to the barycentre: (1 − μ). The parent's
+ *  offset is −μ on the same line — together the pair's separation is preserved
+ *  exactly (μ + (1−μ) = 1), only the reference point moves. */
+export function barycenterMoonScale(m: MoonOrbitElements): number {
+  return 1 - barycenterMu(m);
+}

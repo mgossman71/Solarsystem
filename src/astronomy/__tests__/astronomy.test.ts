@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { eclipticToScene, sceneToEcliptic, type Vec3 } from '../ReferenceFrames';
-import { solveKepler, heliocentricEcliptic, moonLocalPosition } from '../OrbitalElements';
+import { solveKepler, heliocentricEcliptic, moonLocalPosition, barycenterMu, barycenterMoonScale } from '../OrbitalElements';
 import { SimulationClock, SPEED_PRESETS } from '../SimulationClock';
 import { CATALOG, planets, moonsOf, getBody } from '../CelestialCatalog';
 
@@ -77,6 +77,24 @@ describe('OrbitalElements — heliocentric positions (J2000 sanity)', () => {
   it('returns to the start after one full lunar period (Io)', () => {
     const m = getBody('io')!.moon!;
     expect(dist(moonLocalPosition(m, 0, v()), moonLocalPosition(m, m.periodDays, v()))).toBeLessThan(1e-3);
+  });
+});
+describe('OrbitalElements — barycenter (massive moons)', () => {
+  it('returns 0 / 1.0 for a classic moon (no barycenterKm → barycentre at the parent)', () => {
+    const io = getBody('io')!.moon!;
+    expect(io.barycenterKm).toBeUndefined();
+    expect(barycenterMu(io)).toBe(0);
+    expect(barycenterMoonScale(io)).toBe(1);
+  });
+
+  it('Pluto–Charon: μ ≈ 0.975 (barycentre OUTSIDE Pluto), moon scales to 1−μ, separation preserved', () => {
+    const charon = getBody('charon')!.moon!;
+    const mu = barycenterMu(charon);
+    expect(mu).toBeCloseTo(19102 / 19596, 9); // ≈ 0.9748
+    expect(mu).toBeGreaterThan(0.9);
+    expect(barycenterMoonScale(charon)).toBeCloseTo(1 - mu, 12);
+    // The pair's centre-to-centre separation is invariant: μ + (1−μ) = 1.
+    expect(mu + barycenterMoonScale(charon)).toBeCloseTo(1, 12);
   });
 });
 describe('SimulationClock', () => {

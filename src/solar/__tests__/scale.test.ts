@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   EDUCATIONAL_SCALE, REALISTIC_SCALE,
-  orbitRadius, planetDisplayRadius, moonDisplayRadius, moonOrbitRadius,
+  orbitRadius, planetDisplayRadius, moonDisplayRadius, moonOrbitRadius, oblateness,
 } from '../scale';
 
 describe('Solar System scale model', () => {
@@ -56,5 +56,15 @@ describe('Solar System scale model', () => {
     expect(outer).toBeGreaterThan(inner);
     expect(inner).toBeCloseTo(planetR * 1.6 + 2.0 * (421700 / 1882709) * planetR, 6);
     expect(outer).toBeCloseTo(planetR * 3.6, 6);
+  });
+
+  it('oblateness: gas/ice giants are flattened, terrestrials ~spherical, no-radii → 0', () => {
+    // f = 1 − r_polar / r_equatorial, from the true equatorial/polar radii.
+    expect(oblateness({ equatorialRadiusKm: 71492, polarRadiusKm: 66854 })).toBeCloseTo(0.0649, 3); // Jupiter
+    expect(oblateness({ equatorialRadiusKm: 60268, polarRadiusKm: 54364 })).toBeCloseTo(0.098, 3);  // Saturn
+    expect(oblateness({ equatorialRadiusKm: 25559, polarRadiusKm: 24973 })).toBeCloseTo(0.023, 3); // Uranus
+    expect(oblateness({ equatorialRadiusKm: 24764, polarRadiusKm: 24341 })).toBeCloseTo(0.017, 3); // Neptune
+    expect(oblateness({ equatorialRadiusKm: 6378, polarRadiusKm: 6357 })).toBeLessThan(0.005);     // Earth ≈ 0.003
+    expect(oblateness({})).toBe(0); // no radii → sphere
   });
 });

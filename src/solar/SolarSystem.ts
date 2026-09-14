@@ -21,13 +21,13 @@
 import * as THREE from 'three';
 import type { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { planets, moonsOf, getBody } from '../astronomy/CelestialCatalog';
-import { heliocentricEcliptic, moonLocalPosition } from '../astronomy/OrbitalElements';
+import { heliocentricEcliptic, moonLocalPosition, barycenterMoonScale } from '../astronomy/OrbitalElements';
 import { eclipticToScene, type Vec3 } from '../astronomy/ReferenceFrames';
 import type { CelestialBody, MoonOrbitElements } from '../astronomy/types';
 import { SimulationClock, SPEED_PRESETS } from '../astronomy/SimulationClock';
 import {
   EDUCATIONAL_SCALE, REALISTIC_SCALE, ScaleParams,
-  planetDisplayRadius, moonDisplayRadius, moonOrbitRadius, orbitRadius,
+  planetDisplayRadius, moonDisplayRadius, moonOrbitRadius, orbitRadius, oblateness,
 } from './scale';
 
 // ---- Base albedo colors: the honest FALLBACK shown when a real texture is
@@ -143,6 +143,9 @@ function radialToScene(ecl: Vec3, scale: ScaleParams, out: Vec3): Vec3 {
 interface MoonNode { id: string; mesh: THREE.Mesh; orbitR: number; el: MoonOrbitElements }
 interface PlanetNode {
   id: string; group: THREE.Group; mesh: THREE.Mesh; displayR: number;
+  /** Planet + ring core — moves as one (it wobbles around the pair's
+   *  barycentre for Pluto; sits at the group origin for every other planet). */
+  core: THREE.Group;
   periodDays: number; spinRate: number; moons: MoonNode[];
 }
 
@@ -182,10 +185,12 @@ export class SolarSystem {
   /** Optional host callback for "🌌 Milky Way" — go up to the galaxy view. */
   onEnterGalaxy: (() => void) | null = null;
 
-  constructor(scene: THREE.Scene, camera: THREE.PerspectiveCamera, controls: OrbitControls) {
+  constructor(scene: THREE.Scene, camera: THREE.PerspectiveCamera, controls: OrbitControls, clock?: SimulationClock) {
     this.camera = camera;
     this.controls = controls;
-    this.clock = new SimulationClock({ mode: 'visualized', daysPerSecond: 7 }); // 1 week/s default
+    // Shared host clock keeps the same simulated epoch across overview ↔
+    // planet systems (no J2000 reset when you drill in and back out).
+    this.clock = clock ?? new SimulationClock({ mode: 'visualized', daysPerSecond: 7 }); // 1 week/s default
     this.group = new THREE.Group();
     this.group.name = 'SolarSystem';
     this.group.visible = false;
@@ -241,12 +246,20 @@ export class SolarSystem {
     const periodDays = (36525 * 360) / planet.elements!.LDot!;
     const group = new THREE.Group();
     group.name = planet.name;
+    // The core (planet + rings) is a subgroup: for Pluto–Charon it wobbles
+    // around the system's barycentre (the group origin) while Charon orbits
+    // the other side; for every other planet it simply sits at the origin.
+    const core = new THREE.Group();
+    group.add(core);
 
     const planetMat = new THREE.MeshStandardMaterial({ color: colorFor(planet.id), roughness: 0.9, metalness: 0 });
     const mesh = new THREE.Mesh(new THREE.SphereGeometry(displayR, 48, 32), planetMat);
     this.loadBodyTexture(planet.textures?.body, planetMat);
     mesh.name = planet.name;
-    group.add(mesh);
+    // True polar oblateness (gas/ice giants): f = 1 − r_p/r_eq.
+    const f = oblateness(planet);
+    if (f > 0) mesh.scale.y = 1 - f;
+    core.add(mesh);
     this.pickables.push(mesh);
     this.meshToId.set(mesh, planet.id);
     // Period-aware, retrograde-aware spin (relative rates preserved, readably
@@ -273,7 +286,7 @@ export class SolarSystem {
         }),
       );
       ring.rotation.x = Math.PI / 2 - (planet.rotation?.obliquityDeg ?? 0) * Math.PI / 180;
-      group.add(ring);
+      core.add(ring);
       this.loadedTextures.push(ringTex); // CanvasTexture — dispose with the rest
     }
 
@@ -295,7 +308,7 @@ export class SolarSystem {
     }
 
     this.group.add(group);
-    return { id: planet.id, group, mesh, displayR, periodDays, spinRate, moons: moonNodes };
+    return { id: planet.id, group, mesh, core, displayR, periodDays, spinRate, moons: moonNodes };
   }
 
   /** Lazily swap a real equirectangular map into a body's material. If the
@@ -328,13 +341,26 @@ export class SolarSystem {
     for (const p of this.planets) {
       const ecl = heliocentricEcliptic(getBody(p.id)!.elements!, t, _ecl);
       const s = radialToScene(ecl, this.scale, _s);
+      // The GROUP (hence its barycentre) is on the true system orbit; the
+      // planet core wobbles around it by −μ·r when the moon is massive.
       p.group.position.set(s.x, s.y, s.z);
+      p.core.position.set(0, 0, 0);
       p.mesh.rotation.y += dtSeconds * p.spinRate; // period/retrograde-aware spin (fps-independent)
       for (const m of p.moons) {
         const lp = moonLocalPosition(m.el, t, _ecl);
         const n = Math.hypot(lp.x, lp.y, lp.z) || 1;
-        m.mesh.position.set((lp.x / n) * m.orbitR, (lp.y / n) * m.orbitR, (lp.z / n) * m.orbitR);
-        if (m.el.tidallyLocked) m.mesh.rotation.y = Math.atan2(lp.x, lp.z); // face parent
+        const u = { x: lp.x / n, y: lp.y / n, z: lp.z / n };
+        const moonS = barycenterMoonScale(m.el); // 1.0 for a classic moon
+        const mx = u.x * m.orbitR * moonS, my = u.y * m.orbitR * moonS, mz = u.z * m.orbitR * moonS;
+        m.mesh.position.set(mx, my, mz);
+        if (moonS < 1) {
+          // Parent on the far side of the barycentre: −(1 − moonS)·(u·orbitR).
+          const k = (1 - moonS) * m.orbitR;
+          p.core.position.set(-u.x * k, -u.y * k, -u.z * k);
+        }
+        // Tidally locked: keep the same face toward the PARENT (at the core),
+        // not toward the origin — identical for a classic moon (core at 0,0,0).
+        if (m.el.tidallyLocked) m.mesh.rotation.y = Math.atan2(-mx, -mz);
       }
     }
     this.stepTween(dtSeconds);
@@ -424,7 +450,19 @@ export class SolarSystem {
     const p = SPEED_PRESETS.find((x) => x.id === key);
     if (p) this.clock.applyPreset(p);
   }
-  setPaused(paused: boolean): void { this.clock.setMode(paused ? 'paused' : 'visualized'); }
+  /** Last non-paused mode, so pause → resume restores the shared clock's
+   *  real state instead of clobbering it (realtime ↔ visualized). */
+  private lastNonPausedMode: 'realtime' | 'visualized' = 'visualized';
+  setPaused(paused: boolean): void {
+    if (paused) {
+      if (this.clock.mode !== 'paused') {
+        this.lastNonPausedMode = this.clock.mode;
+        this.clock.setMode('paused');
+      }
+    } else if (this.clock.mode === 'paused') {
+      this.clock.setMode(this.lastNonPausedMode);
+    }
+  }
   isPaused(): boolean { return this.clock.mode === 'paused'; }
   /** Toggle educational ↔ realistic distance scale. Returns true if now realistic. */
   toggleScale(): boolean {
@@ -528,6 +566,23 @@ export class SolarSystem {
       (el.querySelector('button[data-role="exit"]') as HTMLButtonElement)
         .addEventListener('click', this.onExit, { signal: this.ac.signal });
     }
+    this.syncTimeUI(); // reflect a shared host clock's existing state
+  }
+
+  /** Mirror the clock's live state into the panel (speed select + pause label)
+   *  — matters when a shared host clock carries state across views. */
+  private syncTimeUI(): void {
+    const speed = this.panel?.querySelector('select[data-role="speed"]') as HTMLSelectElement | null;
+    if (speed) {
+      if (this.clock.mode === 'realtime') {
+        speed.value = 'realtime';
+      } else {
+        const p = SPEED_PRESETS.find((x) => x.id !== 'realtime' && Math.abs(x.daysPerSecond - this.clock.visualizedDaysPerSecond) < 1e-9);
+        if (p) speed.value = p.id;
+      }
+    }
+    const pauseBtn = this.panel?.querySelector('button[data-role="pause"]') as HTMLButtonElement | null;
+    if (pauseBtn) pauseBtn.textContent = this.isPaused() ? 'Resume' : 'Pause';
   }
 
   private syncMoonPicker(planetId: string | null): void {

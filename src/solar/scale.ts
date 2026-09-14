@@ -55,3 +55,17 @@ export function moonOrbitRadius(planetR: number, aKm: number, maxAKm: number): n
   const t = maxAKm > 0 ? aKm / maxAKm : 1;
   return planetR * (1.6 + 2.0 * t);
 }
+
+/**
+ * True polar oblateness f = 1 − r_polar / r_equatorial (gas/ice giants spin
+ * fast enough for centrifugal flattening; terrestrial bodies are ~0.003 and
+ * read as spheres at any screen scale). Drives the mesh's Y-scale:
+ * `scale.y = 1 − f`, with the equatorial radius as the reference.
+ * Returns 0 when the catalog gives no radii (or a non-oblate body).
+ */
+export function oblateness(body: { equatorialRadiusKm?: number; polarRadiusKm?: number }): number {
+  const eq = body.equatorialRadiusKm;
+  const pol = body.polarRadiusKm;
+  if (!eq || !pol || eq <= 0 || pol <= 0) return 0;
+  return Math.max(0, Math.min(0.2, 1 - pol / eq));
+}
