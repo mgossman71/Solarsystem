@@ -16,48 +16,18 @@ same source imagery — the mobile set is a faithful downscale (`scripts/generat
 | `moon/moon-day-1k.jpg` | Moon | 1k | Mobile set. |
 | `sun/sun-4k.jpg` | Sun photosphere | 4k | SDO (high set). |
 | `sun/sun-2k.jpg` | Sun photosphere | 2k | Mobile set. |
+| `saturn/saturn.jpg` | Saturn | — | JPL Cassini/Huygens mosaic — the Earth view's Saturn cinematic (`src/saturn/`). |
+| `saturn/ring-alpha.png` | Saturn rings | 16K | Radial ring alpha strip for the cinematic rings. |
+| `saturn/titan.jpg` | Titan | — | JPL / Cassini. |
+| `saturn/moons/{mimas,enceladus,tethys,dione,rhea,iapetus}.jpg` | Saturn small moons | — | JPL / Cassini. |
 
 > No `earth-topology.png` / bump map is shipped. Earth **and** Moon derive surface relief
 > from their albedo luminance (bright = high), sampled in a tangent basis in the fragment
 > shader. See `docs/earth.md` / `docs/moon.md`.
 
-## Solar System (planets + moons)
-Equirectangular **JPL / planetary imagery** (2:1, north-up), one map per body, referenced
-from the centralized catalog (`src/astronomy/CelestialCatalog.ts` → `textures.body`).
-The loader is lazy and degrades to a flat albedo color if a map is missing or fails
-(never fake geography). **Not** part of the quality-tier `TEXTURE_PATHS` sets — the
-solar views have their own single-resolution assets.
-
-| Path | Body | Source |
-|------|------|--------|
-| `mercury/mercury.jpg` | Mercury | JPL MESSENGER mosaic |
-| `venus/venus.jpg` | Venus **cloud deck** (visible light) | JPL / Magellan-era cloud imagery |
-| `venus/venus-surface.jpg` | Venus **surface** (radar) | Magellan radar map — the second layer |
-| `mars/mars.jpg` | Mars | JPL Viking/Mars Global Surveyor mosaic |
-| `jupiter/jupiter.jpg` | Jupiter | JPL / Hubble visible-light mosaic |
-| `saturn/saturn.jpg` | Saturn | JPL Cassini/Huygens mosaic |
-| `uranus/uranus.jpg` | Uranus | JPL Voyager 2 mosaic |
-| `neptune/neptune.jpg` | Neptune | JPL Voyager 2 mosaic |
-| `pluto/pluto.jpg` | Pluto | JPL New Horizons mosaic |
-| `mars/moons/{phobos,deimos}.jpg` | Phobos / Deimos | JPL |
-| `jupiter/moons/{io,europa,ganymede,callisto}.jpg` | Galilean moons | JPL |
-| `saturn/moons/{mimas,enceladus,tethys,dione,rhea,iapetus}.jpg` | Saturn small moons | JPL / Cassini |
-| `saturn/titan.jpg` | Titan | JPL / Cassini (stored outside `moons/`) |
-| `uranus/moons/{miranda,ariel,umbriel,titania,oberon}.jpg` | Uranus moons | JPL / Voyager 2 |
-| `neptune/moons/triton.jpg` | Triton | JPL / Voyager 2 |
-| `pluto/moons/charon.jpg` | Charon | JPL / New Horizons |
-
-**Venus dual layer** — the only body with two maps: `body` (the visible-light cloud deck,
-the default) and `surface` (the Magellan radar terrain). The planet-system panel's
-"Venus View" control swaps between them live (both preloaded, instant swap; if the radar
-map is missing the control degrades gracefully).
-
-> **sips re-encoding note:** several JPL downloads exceed the GitHub 100 MB single-file
+> **sips re-encoding note:** large JPL downloads exceed the GitHub 100 MB single-file
 > limit at full resolution; they are re-encoded locally with macOS `sips` (quality-100
 > JPEG) to a visually faithful, web-appropriate size before committing.
-> `saturn/ring-alpha.png` (16K, the Saturn cinematic's ring alpha strip) is also shipped;
-> the Solar System views generate their own per-planet radial banding strips in code
-> (`makeRadialRingTexture` in `src/solar/SolarSystem.ts`).
 
 ## Loading tiers (`src/core/Quality.ts` → `TEXTURE_PATHS`)
 Order in each array = **load priority**; the loader falls through to the next candidate
