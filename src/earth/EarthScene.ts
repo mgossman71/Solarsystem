@@ -857,13 +857,18 @@ export class EarthScene {
   // into a bottom sheet. All interaction is delegated to <body>, so the
   // same handler serves both layouts and both pointer types.
   private uiHandler = (e: Event): void => {
-    const el = (e.target as HTMLElement | null)?.closest('[data-focus],[data-orbit],[data-scale],[data-action],[data-quality]') as HTMLElement | null;
+    const el = (e.target as HTMLElement | null)?.closest('[data-focus],[data-orbit],[data-scale],[data-action],[data-quality],[data-explore-planet]') as HTMLElement | null;
     if (!el) return;
 
     // The Solar System toggle owns the whole planet-experience hierarchy
     // (overview / a planet's system / Milky Way) in EVERY state — enter from
     // Earth, or exit back to Earth from any level.
     if (el.dataset.action === 'solar-system') { this.toggleSolarSystem(); return; }
+
+    // Explore-group planet buttons jump straight into that planet's system
+    // view (its moons, up close). Active in EVERY state too, so planets can
+    // be switched directly (Mars → Jupiter) without an overview round trip.
+    if (el.dataset.explorePlanet) { this.enterPlanetDirect(el.dataset.explorePlanet); return; }
 
     // In Solar System mode the Earth-cinematic UI is inert — the Solar System
     // panel + canvas picking are the only controls (two controllers would fight).
@@ -1196,6 +1201,37 @@ export class EarthScene {
     };
     this.planetSystem.group.visible = true;
     this.planetSystem.overview();
+  }
+
+  /** Enter a planet's system view DIRECTLY from an Explore button (any state).
+   *  Tears down whatever solar view is active (if any), hides the Earth
+   *  cinematic — exactly as enterSolarSystem does — then dives into the
+   *  planet and its moons. "← Solar System" in that panel still returns to
+   *  the overview, and the "🌍 Back to Earth" pill exits the whole experience. */
+  private enterPlanetDirect(planetId: string): void {
+    if (this.galaxy) { this.galaxy.dispose(); this.galaxy = null; }
+    if (this.planetSystem) { this.planetSystem.dispose(); this.planetSystem = null; }
+    if (this.solar) { this.solar.dispose(); this.solar = null; }
+    // Reset any state a previous experience left behind.
+    if (this.savedFar != null) { this.camera.far = this.savedFar; this.savedFar = null; }
+    this.savedVisibility.forEach((v, o) => { o.visible = v; });
+    this.savedVisibility.clear();
+    this.camera.updateProjectionMatrix();
+
+    // Hide the Earth cinematic so the planet system is the whole focus.
+    for (const o of this.cinematicBodies()) {
+      if (o) { this.savedVisibility.set(o, o.visible); o.visible = false; }
+    }
+    this.focus = 'earth';
+    this.syncFocusUI();
+    // Extend the far plane (as enterSolarSystem does) so the round trip back
+    // through the overview never clips distant planets.
+    if (this.savedFar == null) this.savedFar = this.camera.far;
+    this.camera.far = 60000;
+    this.camera.updateProjectionMatrix();
+
+    this.enterPlanetSystem(planetId);
+    if (this.solarBtn) { this.solarBtn.textContent = '🌍 Back to Earth'; }
   }
 
   /** Re-show the overview after returning from a planet's system view. Does NOT
