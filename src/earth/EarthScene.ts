@@ -19,6 +19,9 @@ import {
 } from '../core/Quality';
 import { CameraPose, Focus, OrbitMode, ScaleMode } from '../core/types';
 import { isSaturnFocus, isSaturnMoonFocus } from '../core/types';
+import { SolarSystem } from '../solar/SolarSystem';
+import { PlanetSystem } from '../solar/PlanetSystem';
+import { MilkyWay } from '../solar/MilkyWay';
 import {
   INITIAL_MOON_ANGLE,
   INITIAL_SUN_AZIMUTH,
@@ -159,6 +162,15 @@ export class EarthScene {
   private moonMaterial: THREE.ShaderMaterial | null = null;
   /** Saturn system (planet + rings + 7 moons) — see `src/saturn/`. */
   private saturn: SaturnSystem | null = null;
+  /** Full Solar System view (all planets + moons + ephemeris) — see `src/solar/`. */
+  private solar: SolarSystem | null = null;
+  private planetSystem: PlanetSystem | null = null;
+  /** The whole Milky Way (galaxy-level view) — see `src/solar/MilkyWay.ts`. */
+  private galaxy: MilkyWay | null = null;
+  /** Remembered visibility of the Earth-cinematic bodies while in Solar mode. */
+  private savedVisibility = new Map<THREE.Object3D, boolean>();
+  private solarBtn: HTMLButtonElement | null = null;
+  private savedFar: number | null = null;
   private moonAngle = INITIAL_MOON_ANGLE;
   /** Live Moon world position (Earth sits at the origin). */
   readonly moonPosition = new THREE.Vector3();
@@ -843,6 +855,15 @@ export class EarthScene {
     const el = (e.target as HTMLElement | null)?.closest('[data-focus],[data-orbit],[data-scale],[data-action],[data-quality]') as HTMLElement | null;
     if (!el) return;
 
+    // The Solar System toggle owns the whole planet-experience hierarchy
+    // (overview / a planet's system / Milky Way) in EVERY state — enter from
+    // Earth, or exit back to Earth from any level.
+    if (el.dataset.action === 'solar-system') { this.toggleSolarSystem(); return; }
+
+    // In Solar System mode the Earth-cinematic UI is inert — the Solar System
+    // panel + canvas picking are the only controls (two controllers would fight).
+    if (this.solar || this.planetSystem || this.galaxy) return;
+
     const focus = el.dataset.focus as Focus | undefined;
     if (focus) {
       this.setFocus(focus);
@@ -917,6 +938,21 @@ export class EarthScene {
     this.syncQualityUI();
     this.setupSheet();
     this.setupInteractionDim();
+
+    // Solar System toggle — always-available entry to the full-system view.
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.setAttribute('data-action', 'solar-system');
+    btn.textContent = '🌌 Solar System';
+    btn.style.cssText = [
+      'position:fixed', 'right:16px', 'bottom:16px', 'z-index:40',
+      'padding:10px 16px', 'border-radius:999px', 'cursor:pointer',
+      'background:rgba(16,20,30,0.85)', 'backdrop-filter:blur(10px)',
+      'border:1px solid rgba(255,255,255,0.16)', 'color:#eef0f6',
+      'font:600 13px/1 system-ui,-apple-system,Segoe UI,Roboto,sans-serif',
+    ].join(';');
+    document.body.appendChild(btn);
+    this.solarBtn = btn;
   }
 
   /**
@@ -1084,6 +1120,119 @@ export class EarthScene {
    */
   private resetView(): void {
     this.setFocus('earth');
+  }
+
+  // ------------------------------------------------------------
+  // SOLAR SYSTEM MODE (full-system view; Earth cinematic hidden)
+  // ------------------------------------------------------------
+  /** Bodies from the Earth cinematic that are hidden while the full system is shown. */
+  private cinematicBodies(): (THREE.Object3D | null)[] {
+    return [
+      this.earthMesh, this.cloudMesh, this.atmosphereMesh, this.moonMesh,
+      this.saturn?.group ?? null, this.sunGroup,
+    ];
+  }
+
+  private toggleSolarSystem(): void {
+    if (this.galaxy) { this.leaveSolarExperience(); return; }
+    if (this.planetSystem) { this.leaveSolarExperience(); return; }
+    if (this.solar) this.exitSolarSystem();
+    else this.enterSolarSystem();
+  }
+
+  private enterSolarSystem(): void {
+    if (this.solar) return;
+    // Remember + hide the Earth cinematic so the whole system is the focus.
+    for (const o of this.cinematicBodies()) {
+      if (o) { this.savedVisibility.set(o, o.visible); o.visible = false; }
+    }
+    // Neutralize the per-frame Earth-focus camera glue (frame(): focus !== 'earth')
+    // so it cannot fight the Solar System's own camera tween.
+    this.focus = 'earth';
+    this.syncFocusUI();
+
+    this.solar = new SolarSystem(this.scene, this.camera, this.controls);
+    this.solar.onExit = () => this.exitSolarSystem();
+    this.solar.onEnterSystem = (id) => this.enterPlanetSystem(id);
+    this.solar.onEnterGalaxy = () => this.enterMilkyWay();
+    this.solar.group.visible = true;
+    // The full system extends well past the Earth-cinematic far plane
+    // (educational Pluto ≈ 2500, realistic ≈ 23700) — reach either scale.
+    if (this.savedFar == null) this.savedFar = this.camera.far;
+    this.camera.far = 60000;
+    this.camera.updateProjectionMatrix();
+    this.solar.overview(); // frame the whole system from above
+
+    if (this.solarBtn) { this.solarBtn.textContent = '🌍 Back to Earth'; }
+  }
+
+  private exitSolarSystem(): void {
+    if (!this.solar) return;
+    this.solar.dispose();
+    this.solar = null;
+    if (this.savedFar != null) { this.camera.far = this.savedFar; this.savedFar = null; }
+    this.camera.updateProjectionMatrix();
+    this.savedVisibility.forEach((v, o) => { o.visible = v; });
+    this.savedVisibility.clear();
+    if (this.solarBtn) { this.solarBtn.textContent = '🌌 Solar System'; }
+    this.resetView(); // smoothly return to the Earth focus
+  }
+
+  /** Enter a planet's dedicated system view (its moons, up close) — from the
+   *  overview's "🔭 Enter system" button. Keeps the Earth cinematic hidden. */
+  private enterPlanetSystem(planetId: string): void {
+    if (this.planetSystem) { this.planetSystem.dispose(); this.planetSystem = null; }
+    if (this.solar) { this.solar.dispose(); this.solar = null; } // drop the overview (panel + meshes)
+    this.planetSystem = new PlanetSystem(this.scene, this.camera, this.controls, planetId);
+    this.planetSystem.onExit = () => {
+      this.planetSystem?.dispose();
+      this.planetSystem = null;
+      this.reopenOverview();
+    };
+    this.planetSystem.group.visible = true;
+    this.planetSystem.overview();
+  }
+
+  /** Re-show the overview after returning from a planet's system view. Does NOT
+   *  touch savedVisibility/savedFar (the Earth cinematic is still hidden). */
+  private reopenOverview(): void {
+    if (this.solar) { this.solar.group.visible = true; this.solar.overview(); return; }
+    this.solar = new SolarSystem(this.scene, this.camera, this.controls);
+    this.solar.onExit = () => this.exitSolarSystem();
+    this.solar.onEnterSystem = (id) => this.enterPlanetSystem(id);
+    this.solar.onEnterGalaxy = () => this.enterMilkyWay();
+    this.solar.group.visible = true;
+    this.solar.overview();
+  }
+
+  /** Enter the Milky Way view (one level above the Solar System) — from the
+   *  overview's "🌌 Milky Way" button. Keeps the Earth cinematic hidden. */
+  private enterMilkyWay(): void {
+    if (this.galaxy) { this.galaxy.dispose(); this.galaxy = null; }
+    if (this.solar) { this.solar.dispose(); this.solar = null; }
+    if (this.planetSystem) { this.planetSystem.dispose(); this.planetSystem = null; }
+    this.galaxy = new MilkyWay(this.scene, this.camera, this.controls);
+    this.galaxy.onExit = () => {
+      this.galaxy?.dispose();
+      this.galaxy = null;
+      this.reopenOverview();
+    };
+    this.galaxy.group.visible = true;
+    this.galaxy.overview();
+  }
+
+  /** Leave the whole Solar System experience (a planet's system OR the
+   *  overview) and return to the Earth cinematic. */
+  private leaveSolarExperience(): void {
+    if (this.galaxy) { this.galaxy.dispose(); this.galaxy = null; }
+    if (this.planetSystem) { this.planetSystem.dispose(); this.planetSystem = null; }
+    if (this.solar) { this.solar.dispose(); this.solar = null; }
+    if (this.savedFar != null) { this.camera.far = this.savedFar; this.savedFar = null; }
+    this.camera.updateProjectionMatrix();
+    this.savedVisibility.forEach((v, o) => { o.visible = v; });
+    this.savedVisibility.clear();
+    if (this.solarBtn) { this.solarBtn.textContent = '🌌 Solar System'; }
+    this.resetView();
   }
 
   // ------------------------------------------------------------
@@ -1646,6 +1795,7 @@ export class EarthScene {
     });
     dom.addEventListener('pointerup', (e: PointerEvent) => {
       if (e.button !== 0) return;
+      if (this.solar) return; // Solar System mode owns canvas picking
       if (performance.now() - this._tap.downT > 350) return;
       if (Math.hypot(e.clientX - this._tap.downX, e.clientY - this._tap.downY) > 6) return;
       const ndc = new THREE.Vector2(
@@ -2302,6 +2452,11 @@ export class EarthScene {
         sunWorldPos: this.sunWorldPos,
       });
     }
+    // Full Solar System view: advance the authoritative clock + reposition every
+    // planet/moon from the ephemeris (only active in Solar System mode).
+    if (this.solar) this.solar.update(dt);
+    if (this.planetSystem) this.planetSystem.update(dt);
+    if (this.galaxy) this.galaxy.update(dt);
     // Authoritative lighting: the Moon is lit from the Sun's real world
     // position — a true point source — so its phase always matches the
     // Sun–Earth–Moon geometry on screen. Earth sits at the origin, where
@@ -2344,6 +2499,12 @@ export class EarthScene {
     // Saturn system: stop in-flight texture loads from attaching to disposed
     // materials (its meshes/textures are freed by the shared traverse below).
     if (this.saturn) this.saturn.markDisposed();
+    // Solar System view: abort its listeners + remove its panel + free meshes
+    // (the shared traverse below also covers its geometries/materials).
+    if (this.galaxy) { this.galaxy.dispose(); this.galaxy = null; }
+    if (this.planetSystem) { this.planetSystem.dispose(); this.planetSystem = null; }
+    if (this.solar) { this.solar.dispose(); this.solar = null; }
+    if (this.solarBtn) { this.solarBtn.remove(); this.solarBtn = null; }
     // Remove every DOM listener this class attached (window, document, sheet,
     // sun pad/panel, body click — see the { signal } registrations) in one
     // shot; also lets the detached EarthScene become collectable.

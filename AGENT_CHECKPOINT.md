@@ -54,6 +54,89 @@ Build a cinematic, interactive 3D Earth experience in the browser using Three.js
 
 All textures are equirectangular (2:1 aspect), correctly oriented (north up), no mirroring issues.
 
+## 🎨 LATEST MILESTONE — Real Planet Textures + Procedural Rings (overview)
+
+**Status: COMPLETE — TSC ✅ · build ✅ · 45/45 tests (incl. new `rings.test.ts`) · 124/124 lighting checks.**
+
+The Solar System **overview** now renders real imagery instead of flat colors, and the
+ringed giants get honest procedural rings (their image textures 404'd at source).
+
+- **Real equirectangular textures** for all 9 bodies (Mercury→Pluto) + available moons
+  (Io, Europa, Deimos, Saturn's moons). Swapped into `MeshStandardMaterial` by the new
+  `loadBodyTexture()` — **lazy-loaded**, `SRGBColorSpace`, tracked for `dispose()`.
+- **Graceful fallback:** if a texture is missing/undecodable, the flat base-albedo color
+  stays (never fake geography). Verified: dev server returns SPA HTML for a missing asset,
+  which `TextureLoader` can't decode → `onError` → color remains.
+- **Procedural rings** (Jupiter/Saturn/Uranus/Neptune): new `createRingGeo()` (flat annulus,
+  **radial UVs** U=0→1 inner→outer — same convention as the dedicated Saturn ring) +
+  `makeRadialRingTexture()` (canvas gaussian band strip with soft edge fades). Per-planet
+  `RING_DEFS` (extents, icy tint, peak alpha, band centers). Uranus's near-vertical tilt
+  comes from its ~98° obliquity. A real ring image supersedes the strip when one lands.
+- **Period/retrograde-aware spin** in the overview: relative rates preserved and Venus/Uranus
+  spin backwards (from catalog `rotation.periodHours` sign), readably slowed for the overview.
+- **Accurate UI labeling:** `displayName()` shows **"Pluto — Dwarf Planet"** in the body picker.
+- **New test:** `src/solar/__tests__/rings.test.ts` (5 tests — annulus flatness, radial UVs,
+  index validity, `RING_DEFS` sanity for all four giants, Saturn most opaque).
+
+### Files touched this milestone
+| File | Change |
+|------|--------|
+| `src/solar/SolarSystem.ts` | `loadBodyTexture()`, `displayName()`, `createRingGeo()`/`makeRadialRingTexture()`/`RING_DEFS`, per-planet spin rate, procedural ring block, texture disposal, Pluto label. |
+| `src/solar/__tests__/rings.test.ts` | NEW — 5 ring geometry/defs invariant tests. |
+
+### Still pending (not blockers for the overview)
+- **Moon textures** still downloading (Phobos, Ganymede, Callisto, Triton, Charon, Styx/Nix/
+  Kerberos/Hydra, Uranus's five moons) — currently fall back to flat color (honest).
+- **Per-planet system views** (Jupiter Galilean moons, Pluto–Charon) — follow the
+  `SaturnSystem` template; partly blocked on the pending moon textures.
+- **Milky Way galaxy view** — not started (barred-spiral + Solar System on Orion Spur).
+
+---
+
+## 🌌 LATEST MILESTONE — Solar System View (interactive full system)
+
+**Status: COMPLETE — TSC ✅ · build ✅ · 40/40 tests · dev server boots clean.**
+Added from the Earth cinematic UI (`🌌 Solar System` button). A self-contained Three.js
+subsystem that renders **all 9 planets + major moons** from the centralized catalog, driven
+by the authoritative `SimulationClock`. The existing Earth cinematic stays untouched (it is
+hidden while Solar System mode is active and restored on exit).
+
+### New files
+| File | Purpose |
+|------|---------|
+| `src/solar/scale.ts` | Two display scales: `EDUCATIONAL` (`base=398, power=0.5`, fits system in view) & `REALISTIC` (`base=600, power=1.0`, true AU). `planetDisplayRadius`, `moonOrbitRadius`, `radialToScene` (preserves ephemeris direction, scales radius). |
+| `src/solar/SolarSystem.ts` | Renders planets/moons (`MeshStandardMaterial`, lit by central `PointLight`), orbit guides (faithfully shaped, compressed), raycast picking, `CameraTween` fly-to, self-contained control panel (body/moon picker, speed presets, pause, scale toggle, overview, exit), `dispose()`. |
+| `src/solar/__tests__/scale.test.ts` | 6 invariant tests (monotonicity, ordering, bounds, radial compression). |
+
+### Edits
+| File | Change |
+|------|--------|
+| `src/earth/EarthScene.ts` | `🌌 Solar System` button; `enterSolarSystem()/exitSolarSystem()` (hide cinematic bodies, extend far plane → 60k, init/tear down `SolarSystem`); `solar.update(dt)` in `frame()`; guards in `uiHandler` + canvas pointer-up; `dispose()` cleanup. |
+
+### How it works
+- **Scale toggle** (Educational ↔ Realistic): re-scales every planet orbit radius & re-shapes
+  orbit guides by radial compression — orbit **shape/orientation/direction preserved**.
+- **Moons**: orbit radius = `displayR × (semiMajorAxisKm / earthMoonDistKm) × 4`, so every
+  planet's moons are visible & correctly ordered.
+- **Camera**: `tweenTo()` (smoothstep) reframes on focus/overview/scale change; far plane
+  extended to 60,000 to avoid clipping outer planets (Pluto ~2,500 edu / ~23,700 realistic).
+- **Control isolation**: Earth cinematic UI + canvas picking are disabled while active
+  (`if (this.solar) return;` guards) so the two don't fight over the camera.
+
+### Verified
+- `tsc --noEmit` clean · `npm run build` succeeds (43 modules) · `vitest run` 40/40.
+- Dev server (Vite) boots in <200ms, serves the app + both `src/solar/*` modules with no transform errors.
+- Astronomy invariants hold: planets 0.30–30.07 AU (in order); moons <1 planet radius;
+  moon-orbit radii always > planet display radius.
+
+### Remaining / next (not yet done)
+1. **Milky Way background** — currently a plain gradient sky; add a real equirectangular
+   galaxy starfield (the project's stated final goal: "Earth → solar system → galaxy").
+2. **Real planet textures** — planets are currently flat albedo colors; swap to equirectangular
+   NASA/Solar-System-Scope maps for visual fidelity.
+3. **Saturn/Uranus ring refinement** — flat torus rings; consider ring texture maps (alpha).
+4. **UI polish** — date/time readout, body info cards, keyboard shortcuts, "follow" mode.
+
 ## Completed Work
 
 - ✅ Project scaffold (Vite + TypeScript + Three.js)
