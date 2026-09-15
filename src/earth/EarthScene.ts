@@ -48,7 +48,7 @@ import {
 import { prefersReducedMotion } from '../config/mobile';
 import { sunVertexShader, sunFragmentShader } from '../sun/shaders/sun';
 import { createStarField } from './StarField';
-import { createOrbitRings, setRingBrightness as applyRingBrightness, ORBIT_RING_BRIGHTNESS_MIN, ORBIT_RING_BRIGHTNESS_MAX, ORBIT_RING_BRIGHTNESS_DEFAULT } from '../planets/OrbitRings';
+import { createOrbitRings, orientOrbitRings, setRingBrightness as applyRingBrightness, ORBIT_RING_BRIGHTNESS_MIN, ORBIT_RING_BRIGHTNESS_MAX, ORBIT_RING_BRIGHTNESS_DEFAULT } from '../planets/OrbitRings';
 import { earthVertexShader, earthFragmentShader } from '../earth/shaders/earth';
 import { cloudVertexShader, cloudFragmentShader } from '../earth/shaders/cloud';
 import { atmosphereVertexShader, atmosphereFragmentShader } from '../earth/shaders/atmosphere';
@@ -88,6 +88,9 @@ export class EarthScene {
   private atmosphereMesh: THREE.Mesh | null = null;
   private starField: THREE.Points | null = null;
   private orbitRings: THREE.Group | null = null;
+  /** Scratch body positions for the per-frame ring alignment (Earth first,
+   *  then registry order — matches the orbitRings children order). */
+  private ringBodyPositions: THREE.Vector3[] = [new THREE.Vector3(), ...PLANETS.map(() => new THREE.Vector3())];
   private earthMaterial: THREE.ShaderMaterial | null = null;
   private cloudMaterial: THREE.ShaderMaterial | null = null;
   private sunRay: THREE.ArrowHelper | null = null;
@@ -724,7 +727,9 @@ export class EarthScene {
 
     // Faint orbit guide rings (see OrbitRings.ts) — orientation for the
     // top-down System overview. Rebuilt on scale-mode change (radii differ).
-    this.orbitRings = createOrbitRings(this.scene, this.scaleMode, this.state.ringBrightness);
+    // earthPos pre-orients the group so Earth's ring already passes through
+    // Earth on frame 1; frame() re-applies the alignment every frame.
+    this.orbitRings = createOrbitRings(this.scene, this.scaleMode, this.state.ringBrightness, this.earthPos);
 
     // Debug: Sun direction ray (hidden unless toggled) — drawn at the Earth
     // center along the shared apparent Sun direction (toward the Sun at the
@@ -1909,7 +1914,7 @@ export class EarthScene {
       }
       this.orbitRings = null;
     }
-    this.orbitRings = createOrbitRings(this.scene, this.scaleMode, this.state.ringBrightness);
+    this.orbitRings = createOrbitRings(this.scene, this.scaleMode, this.state.ringBrightness, this.earthPos);
   }
 
   /**
@@ -2776,6 +2781,17 @@ export class EarthScene {
         sunWorldPos: this.sunWorldPos,
       });
     }
+    // Orbit guide rings: keep every ring's plane through its body's live
+    // position. Earth's orbit point is Sun-direction driven (sliders, drag,
+    // presets, Auto Sun, Full Daylight), so its ring must re-tilt to pass
+    // through Earth each frame; the planet rings are a no-op in steady state.
+    // Runs after the updates above so all positions are current.
+    let ringIdx = 0;
+    this.ringBodyPositions[ringIdx++].copy(this.earthPos);
+    for (const sys of this.planets.values()) {
+      this.ringBodyPositions[ringIdx++].copy(sys.position);
+    }
+    if (this.orbitRings) orientOrbitRings(this.orbitRings, this.ringBodyPositions);
     // Authoritative lighting: the Moon is lit from the Sun's real world
     // position (the origin) — a true point source — so its phase always
     // matches the Sun–Earth–Moon geometry on screen. For Earth,
