@@ -1,6 +1,6 @@
 # Web-Earth
 
-An interactive, cinematic 3D **Earth** in the browser — with a textured, phase-correct **Moon** and a navigable, bloom-lit **Sun** — built with **Three.js**. The globe uses real NASA/satellite imagery (correctly georeferenced continents, coastlines and oceans — no procedural fakes), with a day/night terminator, city lights, ocean specular, an independent drifting cloud layer, and a sun-aware atmospheric limb glow. Mobile-first, with adaptive quality that renders at the right cost for each device.
+An interactive, cinematic 3D **solar system** in the browser — starting from a top-down **System** overview of all **eight planets** (each on its real inclined orbital plane, with its major moons), zooming in to a textured **Earth** with a phase-correct **Moon** and a navigable, bloom-lit **Sun** — built with **Three.js**. The globe uses real NASA/satellite imagery (correctly georeferenced continents, coastlines and oceans — no procedural fakes), with a day/night terminator, city lights, ocean specular, an independent drifting cloud layer, and a sun-aware atmospheric limb glow. Mobile-first, with adaptive quality that renders at the right cost for each device.
 
 ## Features
 
@@ -8,7 +8,9 @@ An interactive, cinematic 3D **Earth** in the browser — with a textured, phase
 - **Physically-motivated lighting** — a single shared sun direction drives the day/night terminator, city lights, ocean specular, cloud illumination, and atmosphere all at once.
 - **Independent Moon** — real Moon texture, phase driven by the Sun, three orbit modes (*Paused / Visualized / Real Time*).
 - **Navigable Sun** — focus, orbit, and look at a real 4k solar texture with bloom + corona; presets and an auto-orbiting Sun.
-- **Selection & focus** — click/tap any body (Earth, Moon, Sun) to focus; *System* view frames the whole Earth–Moon pair; *Real Scale* shows true relative sizes/distances.
+- **Eight planets + moons** — Mercury through Pluto, each on its **real inclined orbital plane** (inclination + ascending node), with its major moons (Io, Europa, Ganymede, Callisto; Titan, Iapetus; Triton; Charon; …), Saturn's rings, and lazily-loaded textures.
+- **System overview (the default view)** — a straight-down, Sun-centred framing of the whole system with faint **orbit guide rings** (one per planet, in its own inclined plane) and optional **planet name labels** that are themselves clickable and fly you to that planet.
+- **Selection & focus** — click/tap any body, its label, or the **System · Sun · planets** buttons to focus; *Real Scale* shows true relative sizes/distances.
 - **Adaptive quality** — `high / balanced / performance` tiers (pixel-ratio cap, star count, tessellation, bloom, MSAA, texture set), auto-detected from measurable device signals (not user-agent sniffing) with a runtime FPS guard that steps down when a device can't keep up.
 - **Mobile-first UI** — touch orbit/pinch-zoom, a draggable bottom "Controls" sheet, a touch sun pad (azimuth/elevation), safe-area insets, and respect for `prefers-reduced-motion`.
 
@@ -38,9 +40,9 @@ The app is a static site — `npm run build` + `npm run preview` (or serving `di
 |--------|-----|
 | Orbit | Drag (mouse) / one-finger touch |
 | Zoom | Scroll / pinch |
-| Focus a body | Click/tap Earth, Moon, or Sun, or use the **Earth · Moon · Sun · System** segmented control |
+| Focus a body | Click/tap the body (or its name label in the System view), or use the **System · Sun · Mercury … Pluto** buttons; moons via the **Moons** picker (shown when a planet is focused) |
 | Sun position | **Sun Lighting** panel: azimuth/elevation pad or sliders, presets (**Day · Sunset · Night · Backlit**), **Full Daylight**, **Reset Sun**, **Auto** (Sun orbits the camera) |
-| Toggles | **Atmosphere**, **Clouds**, **Stars**, **Auto Rotate**, **Fullscreen**, **Reset** |
+| Toggles | **Atmosphere**, **Clouds**, **Stars**, **Auto Rotate**, **Labels**, **Fullscreen**, **Reset** (back to the System overview) |
 | Quality | **Auto · High · Balanced · Performance** |
 | Moon orbit | **Paused · Visualized · Real Time** |
 | Scale | **Exploration · Real Scale** |
@@ -64,11 +66,11 @@ Useful for deterministic screenshots / QA / debugging. All optional; defaults ap
 | Param | Values | Effect |
 |-------|--------|--------|
 | `quality` | `auto \| high \| balanced \| performance` | Override the quality tier (beats the saved preference) |
-| `focus` | `earth \| moon \| sun \| system` | Initial camera focus |
+| `focus` | `system \| earth \| moon \| sun \| mercury … pluto`, plus planet moons (e.g. `io`, `titan`, `triton`, `charon`) | Initial camera focus (default `system`) |
 | `sun` | `azimuth,elevation` (e.g. `90,20`) | Initial Sun direction (az −180…180, el −90…90; clamped) |
 | `orbit` | `paused \| visualized \| realtime` | Moon orbit mode |
 | `scale` | `explore \| real` | Exploration vs. real relative scale |
-| `clouds` / `atmosphere` / `stars` / `rotate` | `0 \| 1` | Show / hide each layer, or auto-rotate |
+| `clouds` / `atmosphere` / `stars` / `rotate` / `labels` | `0 \| 1` | Show / hide each layer, or auto-rotate / planet name labels |
 | `mode` | `1 \| 2 \| 3` | Debug shading mode |
 | `sunray` / `frontlight` / `softfill` | `1` | Enable each optional lighting effect |
 | `debug` | _(present)_ | Show the debug panel |
@@ -80,11 +82,27 @@ Example: `?focus=sun&quality=high&sun=90,0&scale=real`.
 ```
 index.html                 # Entry HTML + inline UI CSS; loads main.ts
 src/main.ts                # Bootstrap — creates EarthScene, exposes window.__earth
+src/config/
+  camera.ts                # Camera + OrbitControls + System-view framing constants
+  sceneScale.ts            # World-scale constants (orbit radii, Sun, star shell)
+  mobile.ts                # Mobile layout constants
+src/core/
+  Quality.ts               # Adaptive quality: tiers, auto-detection, texture paths
+  types.ts                 # Shared types (Focus, ScaleMode, OrbitMode, …)
 src/earth/
   EarthScene.ts            # Core: renderer, scene, camera, controls, meshes,
-                           #   GLSL shaders, animation loop, UI, quality, sun, moon
-  Quality.ts               # Adaptive quality: tiers, auto-detection, texture paths
-  SunLighting.ts           # Shared azimuth/elevation sun state + vector math
+                           #   animation loop, UI, quality, sun, moon, labels
+  StarField.ts             # Additive star-sprite backdrop shell
+  shaders/                 # Earth day/night, clouds, atmosphere, starfield GLSL
+src/sun/shaders/sun.ts     # Solar photosphere shader
+src/moon/shaders/moon.ts   # Moon phase shader
+src/lighting/SunLighting.ts# Shared azimuth/elevation sun state + vector math
+src/planets/
+  registry.ts              # The eight planets + moons (sizes, inclinations, nodes)
+  orbital.ts               # Shared inclined-circular-orbit position helper
+  PlanetSystem.ts          # One planet: body, rings, moons, spin, lazy textures
+  OrbitRings.ts            # Faint per-planet orbit guide rings (System overview)
+  shaders/                 # Planet, ring, and haze GLSL
 scripts/                   # Texture generation + verification (dev-only)
   generate_mobile_textures.py   # Build the 1k/2k mobile set from the high-res maps
   verify_sun_texture.py         # Sanity-check the solar maps
@@ -93,7 +111,8 @@ scripts/                   # Texture generation + verification (dev-only)
   analyze_assets.py             # Report texture sizes
   lighting_math_test.mjs        # Headless test of the lighting math (no WebGL)
 public/assets/
-  earth/  moon/  sun/    # Real satellite/solar imagery (see Assets below)
+  earth/  moon/  sun/      # Real satellite/solar imagery (see Assets below)
+  mercury/ … pluto/        # Real planet imagery (+ moon maps, Saturn ring)
 Dockerfile                 # Multi-stage: Vite build → nginx:alpine
 docker-compose.yml         # `docker compose up` → http://localhost:3000
 ```
@@ -122,6 +141,11 @@ Real equirectangular imagery (2:1, north up). Each tier loads the largest availa
 | Clouds | `earth/earth-clouds.png`, `earth/earth-clouds-1k.png` | turban/webgl-earth (alpha-only) |
 | Moon | `moon/moon-day-2k.jpg`, `moon/moon-day-1k.jpg` | Lunar imagery |
 | Sun | `sun/sun-4k.jpg`, `sun/sun-2k.jpg` | Solar imagery |
+| Planets | `<planet>/<planet>.jpg` for all eight (`venus/venus-surface.jpg` extra) | Real planet imagery |
+| Planet moons | `<planet>/moons/…` (Mars, Jupiter, Saturn, Uranus, Neptune, Pluto) | Real moon imagery |
+| Saturn rings | `saturn/ring-alpha.png` | Ring alpha map |
+
+Planet textures are **lazy-loaded on first focus** (a correct neutral placeholder shows until each map lands), so the Earth first-paint assets stay small.
 
 The 1k/2k "mobile" set is a faithful downscale of the high-res maps (see `scripts/generate_mobile_textures.py`).
 

@@ -1,16 +1,16 @@
 import * as THREE from 'three';
 import { PLANETS, planetOrbitRadius } from './registry';
 import { orbitPosition } from './orbital';
-import { EARTH_ORBIT_RADIUS } from '../config/sceneScale';
 import type { ScaleMode } from '../core/types';
 
 /**
  * Faint guide rings showing each planet's orbit, centred on the Sun at the
- * origin and drawn in the ecliptic (XZ) plane — the same plane the planets
- * orbit in (PlanetSystem.reposition). Their purpose is orientation in the
- * top-down "System" overview, where the true-scale planets are sub-pixel dots:
- * the rings carry the "planets in their respective orbits" structure while the
- * bodies stay small.
+ * origin — each ring lies in that planet's OWN inclined orbital plane
+ * (inclination + ascending node from the registry, PlanetSystem.reposition),
+ * built with the same orbitPosition() helper the planet position uses. Their
+ * purpose is orientation in the top-down "System" overview, where the
+ * true-scale planets are sub-pixel dots: the rings carry the "planets in their
+ * respective orbits" structure while the bodies stay small.
  *
  * Deliberately very low opacity and non-additive so they read as subtle guides
  * that never compete with the bodies or the star field.
@@ -39,7 +39,6 @@ export function createOrbitRings(scene: THREE.Scene, mode: ScaleMode): THREE.Gro
 
   const group = new THREE.Group();
   group.name = 'orbitRings';
-  group.renderOrder = 1; // after the star field (0), before clouds/atmosphere (1/2)
 
   const ring = (radius: number, inclRad: number, nodeRad: number): THREE.LineLoop => {
     const points: THREE.Vector3[] = [];
@@ -53,13 +52,18 @@ export function createOrbitRings(scene: THREE.Scene, mode: ScaleMode): THREE.Gro
       new THREE.BufferGeometry().setFromPoints(points),
       material, // shared: one material to dispose for every ring
     );
+    // renderOrder must be set on the RENDERED object — three.js does not
+    // inherit it from the parent group. 1 = after the star field (0).
+    line.renderOrder = 1;
     group.add(line);
     return line;
   };
 
-  // Earth orbits the origin directly (a separate module, not in PLANETS) and
-  // sits in the ecliptic (0° inclination) — it defines the reference plane.
-  ring(EARTH_ORBIT_RADIUS, 0, 0);
+  // Deliberately no Earth ring: Earth's position is not an orbit angle —
+  // EarthScene places it at `sun.direction * -EARTH_ORBIT_RADIUS`, and the
+  // Sun-elevation slider can move it from the ecliptic plane straight over
+  // the Sun, so no static ring could ever stay on it. Its name label
+  // (EarthScene.setupPlanetLabels) points at it instead.
   // The eight other planets, each at its mode-specific radius AND its real
   // orbital inclination + ascending node (see registry). Same helper as the
   // planet position, so every planet sits exactly on its ring.

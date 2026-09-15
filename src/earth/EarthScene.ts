@@ -243,6 +243,18 @@ export class EarthScene {
 
   init(): void {
     this.applyURLParams();
+    // The constructor framed the initial System view for the DEFAULT
+    // ('explore') orbit span, but applyURLParams() may have switched to
+    // ?scale=real (Pluto 2300 → 3100), so re-fit the top-down camera now the
+    // final scale mode is known. Instant snap — no user interaction has
+    // happened yet, so no transition is needed (a live toggle later is
+    // handled by setScaleMode).
+    if (this.focus === 'system') {
+      this.camera.position.set(
+        0, this.systemFrameDistance(this.camera.fov, this.camera.aspect), 0,
+      );
+      this.controls.update();
+    }
     this.createSun();
     this.loadSun();
     this.createComposer();
@@ -257,6 +269,11 @@ export class EarthScene {
     this.setupUI();
     this.setupSunUI();
     this.setupPlanetLabels();
+    // Normalise the button state to the DEFAULT focus ('system') — the
+    // markup only carries static defaults and setFocus() (which would do
+    // this) has not run yet. Also hides the Earth-only buttons, which only
+    // make sense while Earth is focused.
+    this.syncFocusUI();
     this.bindSelection();
     this.createHitProxies();
     if (this.debugEnabled) this.setupDebugPanel();
@@ -725,11 +742,14 @@ export class EarthScene {
       this.applyQualityLevers(this.quality!);
     }
 
-    // Focus requested before the Moon existed (URL param or fast UI click).
+    // Focus requested before the body existed (URL param or fast UI click).
     if (this.pendingFocus) {
       const f = this.pendingFocus;
       this.pendingFocus = null;
-      if (f !== 'earth') this.setFocus(f);
+      // 'system' is the default focus — the guard mirrors applyURLParams():
+      // applying it would be a no-op, but every OTHER value (including
+      // 'earth' — ?focus=earth!) must actually land.
+      if (f !== 'system') this.setFocus(f);
     }
 
     // Fade out hint
@@ -1955,9 +1975,11 @@ export class EarthScene {
    * Build one DOM pill per planet into `#planet-labels`. In the top-down
    * System view the true-scale planets are sub-pixel dots (see OrbitRings.ts)
    * — the labels are the only way to tell them apart, so they exist to point
-   * at those dots. The layer is pointer-events:none: orbit/zoom/tap keep
-   * working on the canvas, and tapping a dot still selects the planet through
-   * the enlarged hit proxies.
+   * at those dots. Each pill is itself clickable (data-focus → setFocus) and
+   * is the PRIMARY way to select a planet from the System view: the enlarged
+   * hit proxies are only a few world units across and are well under a pixel
+   * at ~6000+ units of standoff. The rest of the layer is pointer-events:none
+   * so orbit/zoom/tap keep working on the canvas.
    */
   private setupPlanetLabels(): void {
     const layer = document.getElementById('planet-labels');
@@ -1992,6 +2014,10 @@ export class EarthScene {
    *  the camera or off the viewport are hidden (NDC z > 1 / out of range). */
   private updatePlanetLabels(): void {
     if (this.planetLabelEls.length === 0) return;
+    // project() reads camera.matrixWorldInverse, normally only refreshed
+    // inside renderer.render() — refresh it from the camera's current
+    // transform so the projection is exact for THIS frame.
+    this.camera.updateMatrixWorld();
     const show = this.focus === 'system' && this.state.planetLabels;
     const w = this.renderer.domElement.clientWidth;
     const h = this.renderer.domElement.clientHeight;
@@ -2632,9 +2658,11 @@ export class EarthScene {
       this.sunMaterial.uniforms.uTime.value = this.clock.elapsedTime;
     }
     this.updateHitProxies();
-    this.updatePlanetLabels();
 
     this.controls.update();
+    // AFTER controls.update(): projecting earlier leaves every pill a frame
+    // behind the camera (updatePlanetLabels refreshes the camera matrix).
+    this.updatePlanetLabels();
     // Composer path: the scene renders into a linear HDR target (opaque
     // shaders' tone-mapping/color-space includes are no-ops there), the Sun's
     // HDR values drive the bloom, and OutputPass applies ACES + sRGB once.
@@ -2676,6 +2704,12 @@ export class EarthScene {
       this.debugPanel.remove();
       this.debugPanel = null;
     }
+    // The planet-name label pills live in #planet-labels (outside the scene
+    // graph, so the traverse below never sees them) — remove them so none
+    // linger over a load-failure overlay, and clear the references so a
+    // re-instantiation against the same document appends one set, not two.
+    for (const p of this.planetLabelEls) p.el.remove();
+    this.planetLabelEls.length = 0;
     if (this.animationId != null) cancelAnimationFrame(this.animationId);
     this.animationId = null;
     if (this.resetAnimId != null) cancelAnimationFrame(this.resetAnimId);

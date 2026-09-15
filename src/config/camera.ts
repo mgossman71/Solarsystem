@@ -6,12 +6,10 @@ import * as THREE from 'three';
 export const CAMERA_FOV = 45; // vertical field of view (degrees)
 export const CAMERA_NEAR = 0.01;
 export const CAMERA_FAR = 25000; // must clear the far side of the star shell
-  // (12000–13000, see sceneScale STAR_FIELD_RADIUS_*) as seen from the highest
-  // camera — the top-down System zoom-out ceiling (~10000, see
+  // (12000–13000, see sceneScale STAR_FIELD_RADIUS_*) as seen from the
+  // OUTERMOST camera — the top-down System zoom-out ceiling (~10000, see
   // SYSTEM_VIEW_MAX_DISTANCE) puts the far shell edge at ~23000, so 25000
   // leaves headroom.
-// from the OUTERMOST camera: a Pluto focus sees the far side of the shell
-// at ~6550, so 7000 leaves headroom for the focus offset.
 
 /** EARTH-RELATIVE starting offset (Earth orbits the Sun — add to its live
  *  position; the initial orbit angle places Earth opposite the initial Sun). */
@@ -30,7 +28,7 @@ export const CONTROLS = {
 
 /** SYSTEM (top-down overview) framing — the default starting view. */
 export const SYSTEM_VIEW_MIN_DISTANCE = 100; // well above the Sun's corona halo (~7.7)
-export const SYSTEM_VIEW_MAX_DISTANCE = 10000; // zoom-out ceiling (star shell 3300–3450 stays in view)
+export const SYSTEM_VIEW_MAX_DISTANCE = 10000; // zoom-out ceiling (star shell 12000–13000 stays in view)
 export const SYSTEM_VIEW_MAX_FRAME = 8000; // cap on the fit distance (narrow aspects stay sane/zoomable)
 
 /** Interaction "settling" window (ms) before auto-rotate / reframe resume. */

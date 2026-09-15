@@ -2,10 +2,12 @@ import * as THREE from 'three';
 import { STAR_FIELD_RADIUS_MIN, STAR_FIELD_RADIUS_SPAN } from '../config/sceneScale';
 
 // Point-size scale for the star vertex shader (its `uScale` uniform). A point
-// sprite renders `aSize * (uScale / depth)` pixels, so for a fixed world size
-// uScale must grow with the depth the stars sit at — the shell radius. 600.0
-// was hand-tuned for the original 200–350 shell (mean ≈ 275); deriving it from
-// the CURRENT shell mean keeps every star the same on-screen size and
+// sprite renders `aSize * (uScale / shellRadius)` pixels — the divisor is the
+// star's OWN shell radius (see the vertex shader), so the size is independent
+// of camera position and the skybox reads as infinitely distant. For a fixed
+// world size uScale must grow with the radius the stars sit at. 600.0 was
+// hand-tuned for the original 200–350 shell (mean ≈ 275); deriving it from the
+// CURRENT shell mean keeps every star the same on-screen size and
 // self-corrects if the band moves again (rather than silently shrinking as the
 // shell was pushed out past the Saturn moons).
 const STAR_SHELL_MEAN = STAR_FIELD_RADIUS_MIN + STAR_FIELD_RADIUS_SPAN / 2;
