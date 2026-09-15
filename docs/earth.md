@@ -16,8 +16,9 @@ Transparent draw order is **explicit** (`stars 0 < clouds 1 < atmosphere 2`) —
 ## Surface shader (`earth.ts`) — key uniforms
 - `uDayTexture` / `uNightTexture` — real albedo + NASA city lights.
 - `uSunDirection` — the **shared** normalized Sun direction (`SunLightingState.direction`).
-  Earth sits at the origin, so `normalize(sunWorldPos) ≡ sun.direction` — bit-identical to
-  the old infinite-rays model.
+  Earth sits at `earthPos = −EARTH_ORBIT_RADIUS × sun.direction` (it orbits the fixed Sun
+  at the origin), so `normalize(origin − earthPos) ≡ sun.direction` — bit-identical to the
+  old Earth-at-origin model.
 - `uCloudTexture` (alpha-only) + `uCloudShadowStrength` + `uCloudUVOffset` — cloud shadows
   on the surface. The offset tracks the cloud shell's relative Y-rotation (a pure Y-spin is
   exactly a U-offset in equirectangular space).

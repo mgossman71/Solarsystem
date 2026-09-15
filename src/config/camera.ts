@@ -5,10 +5,13 @@ import * as THREE from 'three';
 // ============================================================
 export const CAMERA_FOV = 45; // vertical field of view (degrees)
 export const CAMERA_NEAR = 0.01;
-export const CAMERA_FAR = 2400; // covers Real-Scale Moon (~60) + star field (1000–1150)
+export const CAMERA_FAR = 7000; // covers Real-Scale Pluto (~3100) + star shell (3300–3450)
+// from the OUTERMOST camera: a Pluto focus sees the far side of the shell
+// at ~6550, so 7000 leaves headroom for the focus offset.
 
+/** EARTH-RELATIVE starting offset (Earth orbits the Sun — add to its live
+ *  position; the initial orbit angle places Earth opposite the initial Sun). */
 export const INITIAL_CAMERA_POSITION = new THREE.Vector3(0, 0.5, 3.2);
-export const INITIAL_TARGET = new THREE.Vector3(0, 0, 0);
 
 /** OrbitControls defaults (pan disabled, damped). */
 export const CONTROLS = {

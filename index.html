@@ -516,21 +516,6 @@
       background: rgba(60, 130, 246, 0.3);
       color: #cfe1ff;
     }
-    .body-label {
-      position: absolute;
-      top: 0;
-      left: 0;
-      z-index: 11;
-      color: rgba(255, 255, 255, 0.55);
-      font-size: 11px;
-      letter-spacing: 1px;
-      text-transform: uppercase;
-      pointer-events: none;
-      display: none;
-      text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
-      will-change: transform;
-    }
-
     /* ================= MOBILE LAYOUT (<= 768px) ================= */
     @media (max-width: 768px) {
       .primary-bar, .focus-panel { display: none; }
@@ -578,10 +563,11 @@
 
   <div class="hint-text" id="hint">Drag to rotate &bull; Pinch to zoom</div>
 
-  <!-- Desktop: primary control bar (focus + scene toggles + quality + fullscreen) -->
+  <!-- Desktop: primary control bar (focus + scene toggles + fullscreen) -->
   <div class="primary-bar" id="primary-bar">
     <div class="pb-group">
       <span class="pb-label">Planets</span>
+      <button class="ui-btn" data-focus="sun" aria-pressed="false" title="Fly to the Sun">Sun</button>
       <button class="ui-btn" data-focus="mercury" aria-pressed="false" title="Fly to Mercury">Mercury</button>
       <button class="ui-btn" data-focus="venus" aria-pressed="false" title="Fly to Venus">Venus</button>
       <button class="ui-btn active" data-focus="earth" aria-pressed="true">Earth</button>
@@ -592,26 +578,12 @@
       <button class="ui-btn" data-focus="neptune" aria-pressed="false" title="Fly to Neptune and Triton">Neptune</button>
       <button class="ui-btn" data-focus="pluto" aria-pressed="false" title="Fly to Pluto and Charon">Pluto</button>
     </div>
-    <div class="pb-group">
-      <span class="pb-label">Earth System</span>
-      <button class="ui-btn" data-focus="moon" aria-pressed="false" title="Fly to the Moon">Moon</button>
-      <button class="ui-btn" data-focus="sun" aria-pressed="false" title="Fly to the Sun">Sun</button>
-      <button class="ui-btn" data-focus="system" aria-pressed="false" title="Frame the whole system">System</button>
-    </div>
     <div class="pb-divider"></div>
     <div class="pb-group">
       <button class="ui-btn active" data-action="auto-rotate" aria-pressed="true">Auto Rotate</button>
       <button class="ui-btn active" data-action="atmosphere" aria-pressed="true">Atmosphere</button>
       <button class="ui-btn active" data-action="clouds" aria-pressed="true">Clouds</button>
       <button class="ui-btn" data-action="reset">Reset</button>
-    </div>
-    <div class="pb-divider"></div>
-    <div class="pb-group">
-      <span class="pb-label">Quality</span>
-      <button class="ui-btn active" data-quality="auto" aria-pressed="true">Auto</button>
-      <button class="ui-btn" data-quality="high">High</button>
-      <button class="ui-btn" data-quality="balanced">Balanced</button>
-      <button class="ui-btn" data-quality="performance">Performance</button>
     </div>
     <div class="pb-divider"></div>
     <div class="pb-group">
@@ -683,6 +655,15 @@
         <button class="seg-btn" data-scale="real">Real Scale</button>
       </div>
     </div>
+    <div class="focus-row">
+      <span class="focus-label">Quality</span>
+      <div class="seg-group">
+        <button class="seg-btn active" data-quality="auto" aria-pressed="true">Auto</button>
+        <button class="seg-btn" data-quality="high" aria-pressed="false">High</button>
+        <button class="seg-btn" data-quality="balanced" aria-pressed="false">Balanced</button>
+        <button class="seg-btn" data-quality="performance" aria-pressed="false">Performance</button>
+      </div>
+    </div>
   </div>
   <!-- Mobile: bottom sheet (the collapsed peek acts as the always-visible control bar) -->
   <div class="sheet" id="sheet" data-sheet="collapsed" role="dialog" aria-label="Scene controls">
@@ -697,15 +678,6 @@
       </div>
     </div>
     <div class="sheet-body">
-      <section class="sheet-section">
-        <h3>Quality</h3>
-        <div class="seg-group sheet-seg">
-          <button class="seg-btn active" data-quality="auto">Auto</button>
-          <button class="seg-btn" data-quality="high">High</button>
-          <button class="seg-btn" data-quality="balanced">Balanced</button>
-          <button class="seg-btn" data-quality="performance">Performance</button>
-        </div>
-      </section>
       <section class="sheet-section">
         <h3>Planets</h3>
         <div class="seg-group sheet-seg">
@@ -725,7 +697,6 @@
         <div class="seg-group sheet-seg">
           <button class="seg-btn" data-focus="moon">Moon</button>
           <button class="seg-btn" data-focus="sun">Sun</button>
-          <button class="seg-btn" data-focus="system">System</button>
         </div>
       </section>
       <section class="sheet-section" id="sheet-moons-section">
@@ -748,6 +719,15 @@
         </div>
       </section>
       <section class="sheet-section">
+        <h3>Quality</h3>
+        <div class="seg-group sheet-seg">
+          <button class="seg-btn active" data-quality="auto">Auto</button>
+          <button class="seg-btn" data-quality="high">High</button>
+          <button class="seg-btn" data-quality="balanced">Balanced</button>
+          <button class="seg-btn" data-quality="performance">Performance</button>
+        </div>
+      </section>
+      <section class="sheet-section">
         <h3>Scene</h3>
         <div class="toggle-grid">
           <button class="ui-btn active" data-action="auto-rotate">Auto Rotate</button>
@@ -760,7 +740,6 @@
     </div>
   </div>
 
-  <div class="body-label" id="moon-label">Moon</div>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

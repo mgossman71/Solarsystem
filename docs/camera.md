@@ -4,8 +4,10 @@ Camera + OrbitControls + focus/framing + scale/orbit modes. Defaults live in
 `src/config/camera.ts`; scene geometry in `src/config/sceneScale.ts`.
 
 ## Static setup
-- **Camera**: `PerspectiveCamera(45°, …, near 0.01, far 2400)`; starts at `(0, 0.5, 3.2)`
-  looking at the Earth at the origin.
+- **Camera**: `PerspectiveCamera(45°, …, near 0.01, far 7000)`; starts at
+  `earthPos + (0, 0.5, 3.2)` looking at Earth on its orbit (heliocentric: the Sun is the
+  fixed system centre at the origin, Earth orbits it at `EARTH_ORBIT_RADIUS = 600`).
+  The far plane reaches the star shell (3300–3450) even from a Pluto focus.
 - **Controls**: damping `0.08`, `minDistance 1.3` / `maxDistance 8` (min prevents
   pixelation; max keeps the Sun/stars in frame), **no pan**, rotate `0.5`, zoom `0.8`.
 
@@ -16,8 +18,9 @@ Camera + OrbitControls + focus/framing + scale/orbit modes. Defaults live in
 - `animateCameraTo(pose, ms)` — eased 900 ms fly-to; **0 ms when reduced motion** is set
   (`prefers-reduced-motion()` → instant cuts).
 - `reframeIfOutOfFrame()` — after focus changes, re-fit if the target left the frame.
-- Focusing a **moving** body (Moon/System) keeps `controls.target` glued to it each frame
-  via `focusCenter()`.
+- Focusing a **moving** body (Earth, Moon, or a planet/moon on its orbit) keeps
+  `controls.target` glued to it each frame via `focusCenter()`; `repositionEarth()`
+  additionally shifts camera + target by Earth's per-frame delta when the Sun moves.
 
 ## Modes (UI ↔ state)
 - **Scale mode** `scaleMode`: `explore` (Moon at 10) vs `real` (Moon at true 60.3).

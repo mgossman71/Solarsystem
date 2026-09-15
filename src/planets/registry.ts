@@ -9,10 +9,16 @@
  *   body radii / polar radii (→ oblateness), axial tilts, moon radii,
  *   mean orbital radii, sidereal orbital periods.
  *
- * Scene layout: each planet sits at a FIXED world position compressed into
- * the same scene (like the Sun) — far beyond the Moon's orbit (10–60 units)
- * and well separated from the other planets so disks, moons, and rings never
- * collide at any scale mode.
+ * Scene layout: HELIOCENTRIC — the Sun is the scene centre (origin) and
+ * every planet ORBITS it, advanced by the shared OrbitMode clock
+ * (`planetOrbitPeriod`, same convention as the moons). Orbital radii are
+ * compressed in Exploration mode and expanded in Real Scale — scene-scale
+ * throughout (like every other distance here), with the true ORDER
+ * Mercury→Pluto preserved around Earth's orbit so disks, moons, and rings
+ * never collide at any scale mode. `initialOrbitAngle` is the ecliptic-plane
+ * projection of the planet's old apparent direction from Earth, so the t=0
+ * sky roughly preserves the legacy composition (orbits: x = R·cos θ,
+ * z = −R·sin θ — prograde viewed from the north pole).
  */
 import type { Focus, OrbitMode } from '../core/types';
 
@@ -66,8 +72,14 @@ export interface PlanetDef {
   radiusKm: number;         // equatorial radius
   oblateness: number;       // polar/equatorial ratio (1 = sphere)
   tiltDeg: number;          // axial tilt (obliquity)
-  /** Fixed world position (scene units) — compressed into the Earth scene. */
-  position: [number, number, number];
+  /** Sidereal orbital period around the Sun (days). */
+  orbitPeriodDays: number;
+  /** Orbit radius about the Sun (scene units) — Exploration mode. */
+  exploreOrbit: number;
+  /** Orbit radius about the Sun (scene units) — Real Scale mode. */
+  realOrbit: number;
+  /** rad — starting orbit angle (preserves the legacy composition). */
+  initialOrbitAngle: number;
   /** Cosmetic idle spin, rad/s (signed — negative = retrograde spin, Venus). */
   spinRate: number;
   /** Night-side fill (hazy giants ~0.04, bare rock ~0.02). */
@@ -92,7 +104,7 @@ export const PLANETS: readonly PlanetDef[] = [
   {
     id: 'mercury', name: 'Mercury',
     radiusKm: 2439.7, oblateness: 1.0, tiltDeg: 0.03,
-    position: [150, -20, -60],
+    orbitPeriodDays: 87.969, exploreOrbit: 40, realOrbit: 60, initialOrbitAngle: 0.3805,
     spinRate: 0.002, fill: 0.02, limb: 0.05,
     placeholder: [128, 120, 113],
     moonMinRadius: 0.12,
@@ -101,7 +113,7 @@ export const PLANETS: readonly PlanetDef[] = [
   {
     id: 'venus', name: 'Venus',
     radiusKm: 6051.8, oblateness: 1.0, tiltDeg: 2.64,
-    position: [60, 30, -180],
+    orbitPeriodDays: 224.701, exploreOrbit: 90, realOrbit: 120, initialOrbitAngle: 1.249,
     spinRate: -0.001, fill: 0.04, limb: 0.08,
     placeholder: [216, 190, 150],
     moonMinRadius: 0.12,
@@ -110,7 +122,7 @@ export const PLANETS: readonly PlanetDef[] = [
   {
     id: 'mars', name: 'Mars',
     radiusKm: 3389.5, oblateness: 0.997, tiltDeg: 25.19,
-    position: [-120, -30, 140],
+    orbitPeriodDays: 686.980, exploreOrbit: 800, realOrbit: 900, initialOrbitAngle: -2.2794,
     spinRate: 0.0025, fill: 0.02, limb: 0.05,
     placeholder: [181, 98, 64],
     moonMinRadius: 0.12,
@@ -122,7 +134,7 @@ export const PLANETS: readonly PlanetDef[] = [
   {
     id: 'jupiter', name: 'Jupiter',
     radiusKm: 69911, oblateness: 66856 / 69911, tiltDeg: 3.13,
-    position: [240, 40, -60],
+    orbitPeriodDays: 4332.59, exploreOrbit: 1050, realOrbit: 1250, initialOrbitAngle: 0.245,
     spinRate: 0.006, fill: 0.04, limb: 0.10,
     placeholder: [196, 162, 128],
     moonMinRadius: 0.35,
@@ -136,7 +148,7 @@ export const PLANETS: readonly PlanetDef[] = [
   {
     id: 'saturn', name: 'Saturn',
     radiusKm: 60268, oblateness: 58350 / 60268, tiltDeg: 26.73,
-    position: [-260, 26, -150],
+    orbitPeriodDays: 10759.22, exploreOrbit: 1300, realOrbit: 1600, initialOrbitAngle: 2.6181,
     spinRate: 0.0025, fill: 0.04, limb: 0.10,
     placeholder: [206, 188, 152],
     moonMinRadius: 0.32,
@@ -161,7 +173,7 @@ export const PLANETS: readonly PlanetDef[] = [
   {
     id: 'uranus', name: 'Uranus',
     radiusKm: 25362, oblateness: 24973 / 25559, tiltDeg: 97.77,
-    position: [40, 60, 240],
+    orbitPeriodDays: 30688.5, exploreOrbit: 1600, realOrbit: 2400, initialOrbitAngle: -1.4056,
     spinRate: 0.002, fill: 0.04, limb: 0.08,
     placeholder: [150, 199, 213],
     moonMinRadius: 0.18,
@@ -176,7 +188,7 @@ export const PLANETS: readonly PlanetDef[] = [
   {
     id: 'neptune', name: 'Neptune',
     radiusKm: 24622, oblateness: 24341 / 24622, tiltDeg: 28.32,
-    position: [-80, -60, 200],
+    orbitPeriodDays: 60182, exploreOrbit: 1950, realOrbit: 2750, initialOrbitAngle: -1.9513,
     spinRate: 0.002, fill: 0.04, limb: 0.08,
     placeholder: [76, 107, 194],
     moonMinRadius: 0.2,
@@ -188,7 +200,7 @@ export const PLANETS: readonly PlanetDef[] = [
   {
     id: 'pluto', name: 'Pluto',
     radiusKm: 1188.3, oblateness: 1.0, tiltDeg: 122.5,
-    position: [200, 100, 120],
+    orbitPeriodDays: 90560, exploreOrbit: 2300, realOrbit: 3100, initialOrbitAngle: -0.5404,
     spinRate: 0.0012, fill: 0.02, limb: 0.05,
     placeholder: [189, 162, 138],
     moonMinRadius: 0.1,
@@ -257,6 +269,18 @@ export function moonPeriod(def: MoonDef, orbitMode: OrbitMode): number {
   if (orbitMode === 'paused') return Infinity;
   if (orbitMode === 'realtime') return def.periodDays * 86400;
   return def.periodDays * DAY_SECONDS;
+}
+
+/** Orbit radius about the Sun (scene units) in the given scale mode. */
+export function planetOrbitRadius(def: PlanetDef, scaleMode: 'explore' | 'real'): number {
+  return scaleMode === 'real' ? def.realOrbit : def.exploreOrbit;
+}
+
+/** Sidereal orbital period about the Sun in real seconds (Infinity = paused). */
+export function planetOrbitPeriod(def: PlanetDef, orbitMode: OrbitMode): number {
+  if (orbitMode === 'paused') return Infinity;
+  if (orbitMode === 'realtime') return def.orbitPeriodDays * 86400;
+  return def.orbitPeriodDays * DAY_SECONDS;
 }
 
 /** Spin direction — Triton's retrograde orbit is the one exception. */

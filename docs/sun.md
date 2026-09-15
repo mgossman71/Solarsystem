@@ -15,7 +15,8 @@ Two distinct jobs that live in **two places on purpose**:
   by the Moon (for correct phases). See `docs/moon.md`.
 
 ## Visible object
-- **Radius 2.8 / distance 600** (`SUN_RADIUS` / `SUN_DISTANCE`) → apparent diameter ≈ **0.53°**
+- **Radius 2.8 / distance 600** (`SUN_RADIUS`, and `EARTH_ORBIT_RADIUS = 600` — the Sun is
+  fixed at the scene origin and Earth orbits it at 600) → apparent diameter ≈ **0.53°**
   (the real Sun's ~0.53° at 1 AU) from the default camera. At the closest allowed
   orbit (1.3 units) it's still only ~1.9° — never the dominant frame.
 - Shader `sun/shaders/sun.ts` — SDO photosphere + **procedural granulation** + limb
@@ -34,7 +35,11 @@ Two distinct jobs that live in **two places on purpose**:
 | **Full-daylight** (`fullDaylight`) | Sun placed *behind the camera* (`updateFullDaylightSun`) → no terminator. |
 | **Soft-fill** | `uSoftFill` raises the night-side fill (perceptual clamp, not a linear %). |
 - Presets (`data-preset`): full-daylight / day / sunset / night / backlit.
-- `placeSun()` repositions the visible Sun + corona + hit proxy to `sun.direction × SUN_DISTANCE`.
+- `placeSun()` parks the visible Sun + corona + hit proxy at the **system centre (origin)**
+  — the fixed light source. `repositionEarth()` moves the Earth-Moon system to
+  `−EARTH_ORBIT_RADIUS × sun.direction` whenever the apparent Sun direction changes
+  ("moving the Sun" = moving Earth), and shifts camera + controls target by the same
+  delta so the frame never jumps.
 
 ## Extract / checkpoint
 - Lighting state: ✅ `lighting/SunLighting.ts`. Shader: ✅ `sun/shaders/sun.ts`.

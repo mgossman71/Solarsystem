@@ -5,8 +5,8 @@ The whole UI is **one DOM + all CSS in `index.html`**, with a **single delegated
 elements (desktop ≥ 769 px / mobile ≤ 768 px) — not two copies of the markup.
 
 ## Layouts
-- **Desktop (≥ 769 px):** `#primary-bar` (Explore/focus + scene toggles + Quality +
-  Fullscreen), `#focus-panel` (Moon Orbit + Distance), `#sun-panel` (right).
+- **Desktop (≥ 769 px):** `#primary-bar` (focus + scene toggles + Fullscreen),
+  `#focus-panel` (Moons + Orbit + Distance + Quality), `#sun-panel` (right).
 - **Mobile (≤ 768 px):** a draggable bottom **sheet** (`#sheet`) that collapses to an
   always-visible control bar (`#sheet-toggle` ⚙ + `#sheet-close` ✕ + `#sheet-handle`);
   `#sun-panel` becomes a top-anchored full-width panel.
@@ -14,7 +14,7 @@ elements (desktop ≥ 769 px / mobile ≤ 768 px) — not two copies of the mark
 ## Delegated controls (`uiHandler` on `document.body`)
 | data-attribute | values | effect |
 |----------------|--------|--------|
-| `data-focus` | earth / moon / sun / system | select + reframe |
+| `data-focus` | earth / moon / sun / planets / moons | select + reframe |
 | `data-orbit` | paused / visualized / realtime | Moon orbit speed |
 | `data-scale` | explore / real | Moon orbit distance |
 | `data-quality` | auto / high / balanced / performance | quality tier |
@@ -25,8 +25,13 @@ The **Sun panel keeps its own dedicated listeners** (`setupSunUI`): `[data-prese
 (auto-sun / reset-sun / collapse-sun), `#sun-softfill` checkbox, `.sun-body`. `uiHandler`
 **deliberately skips** those to avoid double-binding.
 
+## Earth-only toggles
+Auto Rotate / Atmosphere / Clouds are Earth-specific layers, so `syncEarthOnlyButtons()`
+hides them (both layouts) whenever the focused body is not Earth — shown again on Earth
+focus (including a pending/deferred Earth focus).
+
 ## Key DOM IDs (must all exist, once)
-`#app #loading #loading-label #loading-fill #hint #moon-label #sheet #sheet-toggle
+`#app #loading #loading-label #loading-fill #hint #sheet #sheet-toggle
 #sheet-handle #sheet-close #primary-bar #sun-panel #sun-pad #sun-knob #sun-az #sun-el
 #sun-az-val #sun-el-val #sun-softfill`
 

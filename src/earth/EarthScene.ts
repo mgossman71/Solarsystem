@@ -20,6 +20,7 @@ import {
 import { CameraPose, Focus, OrbitMode, ScaleMode } from '../core/types';
 import { isPlanetFocus, isPlanetMoonFocus } from '../core/types';
 import {
+  EARTH_ORBIT_RADIUS,
   INITIAL_MOON_ANGLE,
   INITIAL_SUN_AZIMUTH,
   INITIAL_SUN_ELEVATION,
@@ -29,7 +30,6 @@ import {
   MOON_ORBIT_PERIOD_VISUAL,
   MOON_ORBIT_REAL,
   MOON_RADIUS,
-  SUN_DISTANCE,
   SUN_RADIUS,
   wrapAzimuth,
 } from '../config/sceneScale';
@@ -87,21 +87,36 @@ export class EarthScene {
   private cloudMaterial: THREE.ShaderMaterial | null = null;
   private sunRay: THREE.ArrowHelper | null = null;
 
-  // Single authoritative Sun state. `sun.direction` is one normalized
-  // world-space vector shared by reference with the Earth surface, cloud and
-  // atmosphere uSunDirection uniforms — moving the Sun updates every lighting
-  // system at once, so the layers can never visually disagree.
+  // Single authoritative Sun state. `sun.direction` is the APPARENT
+  // Earth→Sun direction — one normalized world-space vector shared by
+  // reference with the Earth surface, cloud and atmosphere uSunDirection
+  // uniforms. Heliocentric inversion: the Sun itself is FIXED at the scene
+  // centre (origin), so "moving the Sun" (azimuth/elevation) = moving the
+  // EARTH-MOON SYSTEM to the anti-solar point,
+  //   earthPos = -EARTH_ORBIT_RADIUS * sun.direction.
+  // Either way the relative direction is what every lighting consumer needs,
+  // and one write updates every lighting system at once — the layers can
+  // never visually disagree.
   private sun = new SunLightingState(INITIAL_SUN_AZIMUTH, INITIAL_SUN_ELEVATION);
 
-  // The visible Sun: a photosphere mesh + corona halo in one group, placed at
-  // sunWorldPos. It IS the authoritative light source — lighting directions
-  // are derived from its position, and every lighting mode (manual, auto,
-  // full daylight) moves the Sun together with the light it produces.
+  // World position of the EARTH-MOON SYSTEM: Earth orbits the Sun (the scene
+  // centre) at EARTH_ORBIT_RADIUS, always opposite the apparent Sun. Field
+  // order matters — `sun` (above) is initialized first.
+  readonly earthPos = new THREE.Vector3()
+    .copy(this.sun.direction)
+    .multiplyScalar(-EARTH_ORBIT_RADIUS);
+
+  // The visible Sun: a photosphere mesh + corona halo in one group parked at
+  // the SYSTEM CENTRE (origin). It IS the authoritative light source —
+  // lighting directions are derived from its position, and every lighting
+  // mode (manual, auto, full daylight) moves the Earth-Moon system around it
+  // instead of moving the Sun, so the disk, the corona and the illuminated
+  // hemispheres always agree.
   private sunGroup: THREE.Group | null = null;
   private sunMesh: THREE.Mesh | null = null;
   private sunMaterial: THREE.ShaderMaterial | null = null;
   private sunCorona: THREE.Sprite | null = null;
-  /** World-space position of the light source = sun.direction * SUN_DISTANCE. */
+  /** World-space position of the light source = the origin (scene centre). */
   private sunWorldPos = new THREE.Vector3();
   /** Per-frame point-source light direction for the Moon (see animate()). */
   private moonSunDir = new THREE.Vector3();
@@ -110,6 +125,8 @@ export class EarthScene {
   private savedManualSun = { azimuth: INITIAL_SUN_AZIMUTH, elevation: INITIAL_SUN_ELEVATION };
   /** Scratch vector for the per-frame Full Daylight computation. */
   private _sunTmp = new THREE.Vector3();
+  /** Scratch vector for repositionEarth(). */
+  private readonly _earthTmp = new THREE.Vector3();
   private sunPad: HTMLElement | null = null;
   private padHalf = 60;
   /** Cached Sun-panel DOM refs — resolved once, so the per-frame update
@@ -135,6 +152,7 @@ export class EarthScene {
   /** True once dispose() has run — in-flight texture loads must not attach. */
   private disposed = false;
 
+  /** EARTH-RELATIVE start offset — Earth orbits the Sun (see createCamera). */
   private initialCameraPosition = INITIAL_CAMERA_POSITION.clone();
 
   private animationId: number | null = null;
@@ -164,14 +182,13 @@ export class EarthScene {
   /** All eight planet systems (planet + optional rings + moons) — see `src/planets/`. */
   private planets = new Map<Focus, PlanetSystem>();
   private moonAngle = INITIAL_MOON_ANGLE;
-  /** Live Moon world position (Earth sits at the origin). */
+  /** Live Moon world position (earthPos + its local orbit offset). */
   readonly moonPosition = new THREE.Vector3();
   private focus: Focus = 'earth';
   /** Focus requested before assets finished loading — applied in loadEarth. */
   private pendingFocus: Focus | null = null;
   private moonOrbit: OrbitMode = 'visualized';
   private scaleMode: ScaleMode = 'explore';
-  private moonLabelEl: HTMLElement | null = null;
 
   // Scratch (reused per frame — no allocations in the render loop).
   private _v = new THREE.Vector3();
@@ -226,7 +243,6 @@ export class EarthScene {
     this.setupSunUI();
     this.bindSelection();
     this.createHitProxies();
-    this.moonLabelEl = document.getElementById('moon-label');
     if (this.debugEnabled) this.setupDebugPanel();
     this.animate();
   }
@@ -236,7 +252,7 @@ export class EarthScene {
   // ------------------------------------------------------------
   // Supported: ?debug  ?clouds=0|1  ?atmosphere=0|1  ?stars=0|1
   //            ?rotate=0|1  ?sun=az,el  ?mode=1|2|3  ?sunray=1
-  //            ?focus=earth|moon|system  ?orbit=paused|visualized|realtime
+  //            ?focus=earth|moon|sun  ?orbit=paused|visualized|realtime
   //            ?scale=explore|real
   private debugEnabled = false;
   /** The ?debug panel element (on <body>) — removed in dispose(). */
@@ -286,7 +302,6 @@ export class EarthScene {
     const focusParam = params.get('focus');
     if (
       focusParam === 'earth' || focusParam === 'moon' || focusParam === 'sun' ||
-      focusParam === 'system' ||
       isPlanetFocus(focusParam as Focus) || isPlanetMoonFocus(focusParam as Focus)
     ) {
       // Defer every non-default focus until its body exists: loadEarth applies
@@ -380,11 +395,14 @@ export class EarthScene {
   };
 
   private createCamera(): THREE.PerspectiveCamera {
-    // Far plane covers the Real-Scale Moon (center-to-center 60.3) with the
-    // camera pulled out to ~100 for the System view; the star field lives
-    // at 1000–1150, well inside the 2400 far plane.
+    // Far plane must reach the star shell (3300–3450) as seen from the
+    // OUTERMOST camera: a Pluto focus at its Real orbit (3100) sees the far
+    // side of the shell ~6550 out (see CAMERA_FAR).
     const camera = new THREE.PerspectiveCamera(CAMERA_FOV, window.innerWidth / window.innerHeight, CAMERA_NEAR, CAMERA_FAR);
-    camera.position.copy(this.initialCameraPosition);
+    // INITIAL_CAMERA_POSITION is Earth-relative: Earth orbits the Sun, so the
+    // starting view is Earth's initial world position + that offset (same
+    // relative geometry as the old Earth-at-origin layout).
+    camera.position.copy(this.earthPos).add(this.initialCameraPosition);
     return camera;
   }
 
@@ -397,6 +415,9 @@ export class EarthScene {
     controls.enablePan = CONTROLS.enablePan;
     controls.rotateSpeed = CONTROLS.rotateSpeed;
     controls.zoomSpeed = CONTROLS.zoomSpeed;
+    // Earth is the default focus and it MOVES (it orbits the Sun) — start
+    // the orbit target on it, not on the scene origin.
+    controls.target.copy(this.earthPos);
 
     controls.addEventListener('start', () => {
       this.isInteracting = true;
@@ -538,6 +559,9 @@ export class EarthScene {
     // Initial rotation to show North America / Atlantic toward camera
     this.earthMesh.rotation.y = -Math.PI * 0.25;
     this.earthMesh.renderOrder = 0;
+    // Born on the orbit (repositionEarth() keeps it there every frame — a
+    // mesh spawned at the origin would sit at the Sun until the next sync).
+    this.earthMesh.position.copy(this.earthPos);
     this.scene.add(this.earthMesh);
 
     // Cloud layer (slightly larger) — a satellite cloud map (white with an
@@ -564,6 +588,7 @@ export class EarthScene {
     this.cloudMesh.rotation.y = -Math.PI * 0.25;
     this.cloudMesh.visible = this.state.clouds;
     this.cloudMesh.renderOrder = 1; // explicit transparent order: surface < clouds < atmosphere
+    this.cloudMesh.position.copy(this.earthPos);
     this.scene.add(this.cloudMesh);
 
     // ?mode=1|2|3 — apply the requested debug render mode once materials exist
@@ -611,6 +636,7 @@ export class EarthScene {
     this.atmosphereMesh = new THREE.Mesh(atmoGeometry, atmoMaterial);
     this.atmosphereMesh.visible = this.state.atmosphere;
     this.atmosphereMesh.renderOrder = 2;
+    this.atmosphereMesh.position.copy(this.earthPos);
     this.scene.add(this.atmosphereMesh);
 
     // Moon — exact 0.2727 size ratio to Earth, shared Sun, real lunar map
@@ -640,12 +666,12 @@ export class EarthScene {
     this.starField = createStarField(this.scene, this.quality!.starCount);
     this.starField.visible = this.state.stars;
 
-    // Debug: Sun direction ray (hidden unless toggled). The Sun is infinitely
-    // distant, so it is drawn as a ray from the planet center along the shared
-    // Sun direction.
+    // Debug: Sun direction ray (hidden unless toggled) — drawn at the Earth
+    // center along the shared apparent Sun direction (toward the Sun at the
+    // origin). repositionEarth() keeps its origin on the moving Earth.
     this.sunRay = new THREE.ArrowHelper(
       this.sun.direction.clone(),
-      new THREE.Vector3(0, 0, 0),
+      this.earthPos.clone(),
       1.8, 0xffcc44, 0.35, 0.18,
     );
     this.sunRay.visible = this.pendingSunRay;
@@ -689,15 +715,17 @@ export class EarthScene {
   // SUN — THE VISIBLE LIGHT SOURCE
   // ------------------------------------------------------------
   // The Sun is a real, navigable object AND the authoritative light source.
-  // It sits at sunWorldPos = sun.direction * SUN_DISTANCE, and:
-  //   • Earth (at the origin) is lit along normalize(sunWorldPos) — exactly
-  //     the shared sun.direction the existing uniforms already use, so its
-  //     shading is bit-identical to the old infinite-rays model.
-  //   • The Moon is lit from its real position (sunDirectionToward), a true
-  //     point source — which is what makes the lunar phase geometrically
-  //     consistent with the visible Sun.
-  // Every lighting mode (manual, auto, full daylight) moves this object, so
-  // the disk, the corona and the illuminated hemispheres always agree.
+  // It sits at the SYSTEM CENTRE (origin), and:
+  //   • Earth (at earthPos, on its orbit) is lit along
+  //     normalize(origin − earthPos) — exactly the shared sun.direction the
+  //     existing uniforms already use, so its shading is bit-identical to
+  //     the old Earth-at-origin model.
+  //   • The Moon is lit from its real world position (sunDirectionToward),
+  //     a true point source — which is what makes the lunar phase
+  //     geometrically consistent with the visible Sun.
+  // Every lighting mode (manual, auto, full daylight) moves the Earth-Moon
+  // system around the fixed Sun, so the disk, the corona and the illuminated
+  // hemispheres always agree.
   private createSun(): void {
     const group = new THREE.Group();
 
@@ -765,14 +793,53 @@ export class EarthScene {
   }
 
   /**
-   * Position the visible Sun at the authoritative light-source position.
-   * Called every frame after the active lighting mode has written
-   * `sun.direction` — manual, auto and full daylight all flow through it.
+   * The Sun is the fixed system centre: its disk + corona live at the origin
+   * and the Earth-Moon system orbits them. "Placing the Sun" therefore just
+   * keeps the light source parked at the origin — idempotent, and the single
+   * place that keeps `sunWorldPos` authoritative for the lighting math.
    */
   private placeSun(): void {
     if (!this.sunGroup) return;
-    this.sunWorldPos.copy(this.sun.direction).multiplyScalar(SUN_DISTANCE);
-    this.sunGroup.position.copy(this.sunWorldPos);
+    this.sunWorldPos.set(0, 0, 0);
+    this.sunGroup.position.set(0, 0, 0);
+  }
+
+  /**
+   * Heliocentric counterpart of "moving the Sun": re-place the entire
+   * Earth-Moon system on Earth's orbit about the Sun (the origin) so the
+   * apparent Sun direction stays `sun.direction`:
+   *
+   *   earthPos = -EARTH_ORBIT_RADIUS * sun.direction
+   *
+   * When the focused body (Earth or Moon) moves with it, the camera AND the
+   * controls target are shifted by the same delta, so the view keeps its
+   * exact offset — "moving the Sun" never jolts the frame. Idempotent: in
+   * manual mode it just re-syncs positions, which is what animate() relies
+   * on (e.g. the first frames after loadEarth() created the meshes).
+   */
+  private repositionEarth(): void {
+    const newE = this._earthTmp.copy(this.sun.direction).multiplyScalar(-EARTH_ORBIT_RADIUS);
+    const dx = newE.x - this.earthPos.x;
+    const dy = newE.y - this.earthPos.y;
+    const dz = newE.z - this.earthPos.z;
+    if (dx !== 0 || dy !== 0 || dz !== 0) {
+      if (this.focus === 'earth' || this.focus === 'moon') {
+        this.camera.position.x += dx;
+        this.camera.position.y += dy;
+        this.camera.position.z += dz;
+        this.controls.target.x += dx;
+        this.controls.target.y += dy;
+        this.controls.target.z += dz;
+      }
+      this.earthPos.copy(newE);
+    }
+    // Position sync (idempotent — also covers the first calls after the
+    // Earth/Moon meshes were created at the origin).
+    if (this.earthMesh) this.earthMesh.position.copy(this.earthPos);
+    if (this.cloudMesh) this.cloudMesh.position.copy(this.earthPos);
+    if (this.atmosphereMesh) this.atmosphereMesh.position.copy(this.earthPos);
+    if (this.sunRay) this.sunRay.position.copy(this.earthPos);
+    if (this.moonMesh) this.updateMoonTransform();
   }
 
   /** Swap the tier-appropriate solar map into the photosphere when it lands. */
@@ -919,6 +986,8 @@ export class EarthScene {
     // have changed the state before this ran — reflect it in the button
     // "active" classes so the UI never lies about the scene.
     this.syncUIButtons();
+    // …and hide the Earth-only toggles if a URL param deferred a non-Earth focus.
+    this.syncEarthOnlyButtons();
 
     // Fullscreen does not exist for documents on iOS Safari — hide the
     // control instead of shipping a dead button.
@@ -1347,14 +1416,21 @@ export class EarthScene {
     const R = this.scaleMode === 'real' ? MOON_ORBIT_REAL : MOON_ORBIT_EXPLORE;
     const a = this.moonAngle;
     const s = Math.sin(a);
+    // Local orbit offset about Earth (the 5.145°-tilted circle), expressed in
+    // WORLD space — Earth itself sits at earthPos on its orbit about the Sun.
+    const lx = R * Math.cos(a);
+    const ly = R * s * Math.sin(MOON_ORBIT_INCLINATION);
+    const lz = R * s * Math.cos(MOON_ORBIT_INCLINATION);
     this.moonPosition.set(
-      R * Math.cos(a),
-      R * s * Math.sin(MOON_ORBIT_INCLINATION),
-      R * s * Math.cos(MOON_ORBIT_INCLINATION),
+      this.earthPos.x + lx,
+      this.earthPos.y + ly,
+      this.earthPos.z + lz,
     );
     if (!this.moonMesh) return;
     this.moonMesh.position.copy(this.moonPosition);
-    this._moonDir.copy(this.moonPosition).multiplyScalar(-1).normalize(); // toward Earth
+    // Tidal lock: face EARTH — the LOCAL offset, not the world position (the
+    // prime meridian points at the planet, not the Sun).
+    this._moonDir.set(-lx, -ly, -lz).normalize();
     this._moonQuat.setFromUnitVectors(this._plusX, this._moonDir);
     this.moonMesh.quaternion.copy(this._moonQuat);
   }
@@ -1370,7 +1446,6 @@ export class EarthScene {
   private focusCenter(out: THREE.Vector3): THREE.Vector3 {
     if (this.focus === 'sun') return out.copy(this.sunWorldPos);
     if (this.focus === 'moon') return out.copy(this.moonPosition);
-    if (this.focus === 'system') return out.copy(this.moonPosition).multiplyScalar(0.5);
     if (isPlanetFocus(this.focus)) {
       const sys = this.planets.get(this.focus);
       if (sys) return sys.center(out);
@@ -1383,7 +1458,9 @@ export class EarthScene {
         return sys.moonWorld(this.focus, out) ?? out.copy(this._origin);
       }
     }
-    return out.copy(this._origin);
+    // 'earth' (the only remaining case): the Earth-Moon system's live world
+    // position on its orbit about the Sun.
+    return out.copy(this.earthPos);
   }
 
   /**
@@ -1409,14 +1486,15 @@ export class EarthScene {
       const dir = this.initialCameraPosition.clone().normalize();
       // Keep the globe (and its 1.08 atmosphere shell) fully in frame even on
       // narrow portrait screens; 3.2 is just the desktop minimum, never a
-      // ceiling on how far we may pull back.
+      // ceiling on how far we may pull back. The pose is RELATIVE TO EARTH'S
+      // LIVE POSITION — the per-frame target glue (animate) keeps tracking it.
       const dist = Math.max(
         this.initialCameraPosition.length(),
         this.fitDistance(1.08, 0, 1.06),
       );
       return {
-        position: dir.multiplyScalar(dist),
-        target: this._origin.clone(),
+        position: this.earthPos.clone().addScaledVector(dir, dist),
+        target: this.earthPos.clone(),
         minDistance: 1.3,
         maxDistance: 8,
       };
@@ -1449,7 +1527,7 @@ export class EarthScene {
         position: target.clone().addScaledVector(dir, dist),
         target,
         minDistance: SUN_RADIUS * 2.2, // never clip inside the photosphere
-        maxDistance: SUN_DISTANCE * 1.2, // pull back until Earth fits too
+        maxDistance: EARTH_ORBIT_RADIUS * 1.2, // pull back until Earth fits too
       };
     }
     if (isPlanetFocus(focus)) {
@@ -1499,20 +1577,8 @@ export class EarthScene {
         };
       }
     }
-    // system: pull back until BOTH bodies fit — in the vertical AND the
-    // horizontal FOV (portrait phones are usually the binding axis).
-    const target = this.moonPosition.clone().multiplyScalar(0.5);
-    const halfSpan = this.orbitRadius() * 0.5 + MOON_RADIUS;
-    const dist = Math.max(this.fitDistance(halfSpan, 0, 1.15) + MOON_RADIUS, 2);
-    const dir = this._v.copy(this.camera.position).sub(target);
-    if (dir.lengthSq() < 1e-8) dir.set(0, 0.25, 1);
-    dir.normalize();
-    return {
-      position: target.clone().addScaledVector(dir, dist),
-      target,
-      minDistance: 2,
-      maxDistance: dist * 2.5,
-    };
+    // Defensive fallback (every known focus is handled above): Earth pose.
+    return this.computeFocusPose('earth');
   }
 
   /**
@@ -1617,6 +1683,22 @@ export class EarthScene {
     document.querySelectorAll('[data-moon-owner]').forEach((el) => {
       (el as HTMLElement).hidden = owner == null || (el as HTMLElement).dataset.moonOwner !== owner;
     });
+    this.syncEarthOnlyButtons();
+  }
+
+  /**
+   * Auto Rotate / Atmosphere / Clouds are Earth-specific layers — they only
+   * make sense while Earth is the focused body, so they are only VISIBLE then
+   * (in both layouts: the desktop bar and the mobile sheet). Falls back on
+   * pendingFocus like syncFocusUI so a deferred request stays honest.
+   */
+  private syncEarthOnlyButtons(): void {
+    const earthActive = (this.pendingFocus ?? this.focus) === 'earth';
+    for (const action of ['auto-rotate', 'atmosphere', 'clouds']) {
+      document.querySelectorAll(`[data-action="${action}"]`).forEach((el) => {
+        (el as HTMLElement).hidden = !earthActive;
+      });
+    }
   }
 
   /** Populate a moon button group (desktop panel / mobile sheet) from the
@@ -1641,14 +1723,14 @@ export class EarthScene {
    *  any UI is wired; Moon and Saturn arrive with the first-paint assets). */
   private isFocusReady(f: Focus): boolean {
     if (f === 'earth' || f === 'sun') return true;
-    if (f === 'moon' || f === 'system') return this.moonMesh != null;
+    if (f === 'moon') return this.moonMesh != null;
     if (isPlanetFocus(f)) return this.planets.has(f);
     if (isPlanetMoonFocus(f)) return this.planets.has(MOON_OWNER[f]);
     return false;
   }
 
   /**
-   * Switch focus (Earth / Moon / System): reframe the camera with a
+   * Switch focus (Earth / Moon / Sun / planets / moons): reframe the camera with a
    * cinematic transition and re-point OrbitControls at the new target.
    * While focused on a moving body, animate() keeps the controls target
    * glued to it every frame.
@@ -1695,7 +1777,7 @@ export class EarthScene {
       h.classList.toggle('active', h.dataset.scale === mode);
       h.setAttribute('aria-pressed', String(h.dataset.scale === mode));
     });
-    // The system span changed — re-frame if we are looking at it (and its
+    // The orbit span changed — re-frame if we are looking at it (and its
     // body exists — a deferred focus must not compute a pose against null).
     if (this.focus !== 'earth' && this.isFocusReady(this.focus)) {
       this.animateCameraTo(this.computeFocusPose(this.focus));
@@ -1753,7 +1835,7 @@ export class EarthScene {
       return { mesh, focus };
     };
     const earth = make(1.15, 'earth');
-    earth.mesh.position.set(0, 0, 0);
+    earth.mesh.position.copy(this.earthPos);
     earth.mesh.visible = true;
     this.hitProxies.push(earth);
     const sun = make(SUN_RADIUS * 1.2, 'sun');
@@ -1788,8 +1870,10 @@ export class EarthScene {
   /** Keep the moving proxies in lock-step with their bodies (per frame). */
   private updateHitProxies(): void {
     for (const p of this.hitProxies) {
-      if (p.focus === 'earth') p.mesh.visible = true;
-      else if (p.focus === 'sun') {
+      if (p.focus === 'earth') {
+        p.mesh.visible = true;
+        p.mesh.position.copy(this.earthPos);
+      } else if (p.focus === 'sun') {
         p.mesh.visible = true;
         p.mesh.position.copy(this.sunWorldPos);
       } else if (p.focus === 'moon') {
@@ -1825,33 +1909,6 @@ export class EarthScene {
     }
   }
 
-  // ------------------------------------------------------------
-  // MOON LABEL (System view only)
-  // ------------------------------------------------------------
-  private lastMoonLabelDisplay: string | null = null;
-  private updateMoonLabel(): void {
-    const el = this.moonLabelEl;
-    if (!el) return;
-    if (this.focus !== 'system' || !this.moonMesh) {
-      if (this.lastMoonLabelDisplay !== 'none') el.style.display = 'none';
-      this.lastMoonLabelDisplay = 'none';
-      return;
-    }
-    this._v.copy(this.moonPosition).project(this.camera);
-    if (this._v.z > 1) {
-      if (this.lastMoonLabelDisplay !== 'none') el.style.display = 'none';
-      this.lastMoonLabelDisplay = 'none';
-      return;
-    }
-    const x = (this._v.x * 0.5 + 0.5) * window.innerWidth;
-    const y = (-this._v.y * 0.5 + 0.5) * window.innerHeight;
-    if (this.lastMoonLabelDisplay !== 'block') {
-      el.style.display = 'block';
-      this.lastMoonLabelDisplay = 'block';
-    }
-    el.style.transform = `translate(-50%, -170%) translate(${x}px, ${y}px)`;
-  }
-
   /** Hide on platforms without document fullscreen (e.g. iOS Safari). */
   private static fullscreenSupported(): boolean {
     const d = document.documentElement as HTMLElement & { webkitRequestFullscreen?: () => void };
@@ -1880,15 +1937,18 @@ export class EarthScene {
   //   2. FULL DAYLIGHT — the direction is recomputed every frame from the
   //      camera, so the Sun sits behind the viewer and the visible hemisphere
   //      stays lit while orbiting.
-  // updateSun() is the single write path for MANUAL mode. It stores the
-  // azimuth/elevation and updates the shared SunLightingState. It never
-  // touches the camera or the Earth rotation, so camera and Sun stay fully
-  // independent in both modes.
+  // Both modes define the APPARENT Sun direction as seen from Earth; since
+  // the Sun itself is the fixed system centre, they reposition the Earth-Moon
+  // system onto the matching orbit point (repositionEarth) instead of moving
+  // the light. updateSun() is the single write path for MANUAL mode.
   private updateSun(azimuth: number, elevation: number): void {
     this.sun.set(azimuth, elevation);
     // setDirection derives a quaternion from the vector and retains no
     // reference to it — no clone needed.
     if (this.sunRay) this.sunRay.setDirection(this.sun.direction);
+    // "Moving the Sun" = moving the Earth-Moon system to the anti-solar point
+    // (the camera follows when Earth/Moon is the focus).
+    this.repositionEarth();
     this.updateSunUI();
   }
 
@@ -1896,19 +1956,23 @@ export class EarthScene {
   // FULL DAYLIGHT (camera-following Sun)
   // ------------------------------------------------------------
   // The shader convention is: uSunDirection = the world-space direction the
-  // Sun lies in (lit hemisphere faces it). Placing the Sun behind the viewer
-  // therefore means direction = normalize(cameraPosition - earthCenter), where
-  // earthCenter is EARTH'S CENTRE (the origin) — a FIXED reference, deliberately
-  // NOT the orbit target. This matters: when the Sun is the focus, the target
-  // tracks the Sun (see animate()), so deriving the direction from a target the
-  // Sun is positioned relative to would be a divergent feedback loop. That
-  // vector is written IN PLACE into the one shared Vector3 every uSunDirection
-  // uniform references, so the surface day/night blend, city lights, ocean
-  // specular, clouds and atmosphere all follow the camera together — no layer
-  // invents its own light, and no ambient/emissive cheat flattens the shading.
+  // Sun lies in (lit hemisphere faces it). "Sun behind the viewer" therefore
+  // means the camera's Earth-relative offset points at the Sun:
+  // direction = normalize(cameraPosition − earthPos), where earthPos is
+  // EARTH'S CENTRE — a FIXED reference, deliberately NOT the orbit target.
+  // This matters: with the Sun the focus, the target tracks the Sun (see
+  // animate()), so deriving the direction from a target the system is
+  // positioned relative to would be a divergent feedback loop.
+  // repositionEarth() then places the Earth-Moon system at
+  // −EARTH_ORBIT_RADIUS * direction, so the fixed Sun (origin) sits exactly
+  // behind the viewer. That vector is written IN PLACE into the one shared
+  // Vector3 every uSunDirection uniform references, so the surface day/night
+  // blend, city lights, ocean specular, clouds and atmosphere all follow the
+  // camera together — no layer invents its own light, and no
+  // ambient/emissive cheat flattens the shading.
   private updateFullDaylightSun(): void {
-    this._sunTmp.copy(this.camera.position).sub(this._origin);
-    if (this._sunTmp.lengthSq() < 1e-12) return; // degenerate: camera on centre
+    this._sunTmp.copy(this.camera.position).sub(this.earthPos);
+    if (this._sunTmp.lengthSq() < 1e-12) return; // degenerate: camera on Earth
     this._sunTmp.normalize();
     this.sun.direction.copy(this._sunTmp);
     // Sync azimuth/elevation from the vector so the panel readout, knob and
@@ -1920,6 +1984,8 @@ export class EarthScene {
       wrapAzimuth(Math.atan2(this._sunTmp.z, this._sunTmp.x) * RAD2DEG);
     if (this.sunRay) this.sunRay.setDirection(this.sun.direction);
     this.updateSunUI();
+    // Move the Earth-Moon system to the anti-solar point (camera follows).
+    this.repositionEarth();
   }
 
   private setFullDaylight(on: boolean): void {
@@ -2355,13 +2421,20 @@ export class EarthScene {
       const nextAz = wrapAzimuth(this.sun.azimuth + dt * 10);
       this.updateSun(nextAz, this.sun.elevation);
     }
-    // Park the visible Sun at the light source (sun.direction * SUN_DISTANCE)
-    // so the disk, the corona and the hemisphere they illuminate can never
-    // disagree — in manual, auto and full-daylight mode alike.
+    // Keep the visible Sun parked at the SYSTEM CENTRE (origin) — the fixed
+    // light source — so the disk, the corona and the hemisphere they
+    // illuminate can never disagree, in manual, auto or full-daylight mode
+    // alike. (What moves is the Earth-Moon system — see repositionEarth.)
     this.placeSun();
+    // Re-sync the Earth-Moon meshes to earthPos EVERY frame: in manual Sun
+    // mode nothing else calls repositionEarth(), and loadEarth() creates the
+    // meshes at the origin (the Sun) — without this they would sit at the
+    // Sun while the camera frames Earth's orbit point. Idempotent no-op once
+    // parked; also covers meshes that arrive later (quality-tier swaps).
+    this.repositionEarth();
 
-    // Moon: advance the orbit (Paused / Visualized / Real Time), reposition,
-    // and keep the camera target glued to the focused moving body.
+    // Moon: advance the orbit (Paused / Visualized / Real Time) about the
+    // live earthPos.
     if (this.moonOrbit === 'visualized') {
       this.moonAngle += (dt * Math.PI * 2) / MOON_ORBIT_PERIOD_VISUAL;
     } else if (this.moonOrbit === 'realtime') {
@@ -2369,9 +2442,14 @@ export class EarthScene {
     }
     if (this.moonMesh) {
       this.updateMoonTransform();
-      if (this.resetAnimId == null && this.focus !== 'earth') {
-        this.controls.target.copy(this.focusCenter(this._v));
-      }
+    }
+    // Keep the orbit pivot glued to the focused body while it moves — Earth
+    // orbits the Sun, the Moon orbits Earth, planets advance their orbits.
+    // repositionEarth() already shifted the target by Earth's per-frame delta;
+    // this re-glues after the Moon/planet steps and any focus change. Camera
+    // transitions drive the target themselves, so they take priority.
+    if (this.resetAnimId == null) {
+      this.controls.target.copy(this.focusCenter(this._v));
     }
     // Planets: advance each spin + moon orbit (same orbit/scale modes as the
     // Earth Moon), shared point-source Sun lighting.
@@ -2384,15 +2462,14 @@ export class EarthScene {
       });
     }
     // Authoritative lighting: the Moon is lit from the Sun's real world
-    // position — a true point source — so its phase always matches the
-    // Sun–Earth–Moon geometry on screen. Earth sits at the origin, where
-    // normalize(sunWorldPos) ≡ sun.direction: its existing shared uniform is
-    // already exactly that, so its shading is unchanged.
+    // position (the origin) — a true point source — so its phase always
+    // matches the Sun–Earth–Moon geometry on screen. For Earth,
+    // normalize(origin − earthPos) ≡ sun.direction (earthPos = −R ·
+    // sun.direction), so the existing shared uniform is already exact.
     sunDirectionToward(this.sunWorldPos, this.moonPosition, this.moonSunDir);
     if (this.sunMaterial) {
       this.sunMaterial.uniforms.uTime.value = this.clock.elapsedTime;
     }
-    this.updateMoonLabel();
     this.updateHitProxies();
 
     this.controls.update();

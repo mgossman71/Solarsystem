@@ -7,15 +7,23 @@
 
 export const EARTH_RADIUS = 1;
 
-// ---- Sun (a real scene object, not a fake directional light) ----
-// Radius 2.8 at distance 600 gives an apparent size of ~0.53° from Earth
-// (2·atan(2.8/600)) — the true solar angular diameter — and ≫ the Moon orbit
-// (≤ 60.3), so its light behaves like a distant point source with physically
-// correct parallax. The star shell sits BEYOND the Sun (STAR_FIELD_RADIUS_*):
-// the skybox is the farthest layer, so the Sun occludes stars behind it
-// instead of stars painting over the bright disk.
+// ---- Sun & Earth's orbit (heliocentric core) ----
+// The layout is HELIOCENTRIC: the Sun is a real scene object at the SYSTEM
+// CENTRE (origin), Earth orbits it at EARTH_ORBIT_RADIUS, and every planet
+// orbits beyond Earth (see planets/registry.ts). That Earth–Sun distance
+// calibrates the Sun's apparent size: radius 2.8 at 600 gives ~0.53° from
+// Earth (2·atan(2.8/600)) — the true solar angular diameter — and ≫ the Moon
+// orbit (≤ 60.3), so its light behaves like a distant point source with
+// physically correct parallax. The star shell sits BEYOND every body
+// (STAR_FIELD_RADIUS_*): the skybox is the farthest layer, so the Sun
+// (at the centre) occludes stars behind it instead of stars painting over
+// the bright disk.
 export const SUN_RADIUS = 2.8;
-export const SUN_DISTANCE = 600;
+/** Earth–Sun distance = Earth's orbital radius about the Sun (BOTH scale
+ *  modes — the calibration distance for the Sun's true apparent size). */
+export const EARTH_ORBIT_RADIUS = 600;
+/** Earth's sidereal year (days) — feeds the shared orbit clock (DAY_SECONDS). */
+export const EARTH_ORBIT_PERIOD_DAYS = 365.256;
 
 // Initial Earth-relative Sun direction (azimuth/elevation, degrees).
 export const INITIAL_SUN_AZIMUTH = 150; // -180..180 (az=+90 => toward default cam at +Z)
@@ -34,15 +42,13 @@ export const MOON_ORBIT_PERIOD_REALTIME = 27.32 * 24 * 3600; // sidereal month, 
 // The shell must sit BEHIND every body the camera looks past, in BOTH scale
 // modes — stars between the camera and a body composite over transparent
 // areas (additive points never write depth → "stars through the rings"). The
-// farthest body is Iapetus in Real scale: Saturn's centre (|r| ≈ 301) plus its
-// true orbit (~559) ≈ 860 from the origin, so the shell's inner edge clears
-// that. 1000–1150 also sits beyond the Sun (600): the skybox is the farthest
-// layer, so the Sun correctly occludes stars behind it. (Per-star pixel size
-// tracks the shell depth via StarField's `uScale`, and star COUNT is
-// radius-independent for a centred camera — so neither needs changing when the
-// band moves.)
-export const STAR_FIELD_RADIUS_MIN = 1000;
-export const STAR_FIELD_RADIUS_SPAN = 150; // radius = MIN + rand() * SPAN (1000–1150)
+// farthest body is Pluto in Real scale: its orbit (3100) plus Charon (0.55)
+// ≈ 3100.5 from the Sun at the origin, so the shell's inner edge clears that.
+// (Per-star pixel size tracks the shell depth via StarField's `uScale`, and
+// star COUNT is radius-independent for a centred camera — so neither needs
+// changing when the band moves.)
+export const STAR_FIELD_RADIUS_MIN = 3300;
+export const STAR_FIELD_RADIUS_SPAN = 150; // radius = MIN + rand() * SPAN (3300–3450)
 
 /** Wrap an azimuth in degrees into the -180..180 range. */
 export function wrapAzimuth(deg: number): number {

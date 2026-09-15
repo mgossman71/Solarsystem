@@ -5,7 +5,8 @@
  * mooniest one (carried over from the old `src/saturn/` module).
  *
  * Layout:
- *   group (fixed at def.position)
+ *   group (on its orbit around the Sun at the scene centre — advanced
+ *    each frame by the shared OrbitMode clock)
  *     └─ tiltGroup (rotation.z = -tilt, equator in local XZ, Y = spin axis)
  *          ├─ planetMesh (oblate spheroid when def.oblateness < 1)
  *          ├─ ringMesh   (only for def.ring — Saturn today)
@@ -22,11 +23,14 @@
  *    up, near-side center at local +X at identity orientation) — rocky/icy
  *    moons reuse the Moon shader verbatim; haze moons (Titan) get a shell.
  *
- * Orbits: circular, in the planet's equatorial plane (real inclinations are
- * 0–1.6° for the focusable moons, visually indistinguishable at these
- * sizes; Triton's retrograde direction is honored). Angles advance with the
- * shared OrbitMode clock; in "Real Scale" mode radii and orbits are the true
- * values, in Exploration mode orbits are compressed and small moons are
+ * Orbits: the planet's orbit about the Sun is circular, in the ecliptic
+ * (XZ) plane, prograde viewed from the north pole (x = R·cos θ,
+ * z = −R·sin θ), advanced with the shared OrbitMode clock
+ * (`planetOrbitPeriod`). Moon orbits are circular, in the planet's
+ * equatorial plane (real inclinations are 0–1.6° for the focusable moons,
+ * visually indistinguishable at these sizes; Triton's retrograde direction
+ * is honored). In "Real Scale" mode radii and orbits are the true values,
+ * in Exploration mode orbits are compressed and small moons are
  * clamped to a readable floor.
  */
 import * as THREE from 'three';
@@ -44,6 +48,8 @@ import {
   planetMoonOrbit,
   planetMoonRenderRadius,
   planetMoonTexture,
+  planetOrbitPeriod,
+  planetOrbitRadius,
   planetRadius,
 } from './registry';
 import { planetFragmentShader, planetVertexShader } from './shaders/planet';
@@ -88,7 +94,12 @@ export class PlanetSystem {
   readonly moonRadii: number[];
   /** Shared sun direction (uniform value for every planet material). */
   readonly sunDirection = new THREE.Vector3(1, 0, 0);
+  /** World position of the planet center (on its orbit about the Sun). */
   readonly position: THREE.Vector3;
+  /** Current orbit angle about the Sun (rad; x = R·cos θ, z = −R·sin θ). */
+  private orbitAngle: number;
+  /** Current orbit radius (scene units; follows the active scale mode). */
+  private orbitRadius: number;
 
   private scaleMode: ScaleMode = 'explore';
   private maxAnisotropy: number;
@@ -117,7 +128,15 @@ export class PlanetSystem {
     const seg = quality.sphereSegments;
 
     // --- Group hierarchy ------------------------------------------------
-    this.position = new THREE.Vector3(...def.position);
+    // The Sun is the scene centre (origin); the planet sits on its orbit,
+    // starting at def.initialOrbitAngle in the Exploration radius.
+    this.orbitAngle = def.initialOrbitAngle;
+    this.orbitRadius = def.exploreOrbit;
+    this.position = new THREE.Vector3(
+      Math.cos(this.orbitAngle) * this.orbitRadius,
+      0,
+      -Math.sin(this.orbitAngle) * this.orbitRadius,
+    );
     this.group = new THREE.Group();
     this.group.position.copy(this.position);
 
@@ -153,7 +172,9 @@ export class PlanetSystem {
       uniforms: {
         uMap: { value: bodyPlaceholder },
         uSunDirection: { value: this.sunDirection },
-        uCenter: { value: this.position.clone() },
+        // Live shared instance: it always holds the planet's CURRENT world
+        // center, so ring/moon shadow math follows the orbit for free.
+        uCenter: { value: this.position },
         uAxis: { value: axis },
         uRingInner: { value: ring ? ring.inner : 0 },
         uRingOuter: { value: ring ? ring.outer : 0 },
@@ -282,17 +303,25 @@ export class PlanetSystem {
   // ------------------------------------------------------------
   // PER-FRAME
   // ------------------------------------------------------------
-  /** Advance spin + moon orbits, tidal lock, and refresh sun/shadow uniforms. */
+  /** Advance the Sun orbit + spin + moon orbits, tidal lock, and refresh
+   *  sun/shadow uniforms. */
   update(dt: number, p: PlanetFrameParams): void {
     if (this.disposed) return;
+
+    if (p.scaleMode !== this.scaleMode) this.applyScaleMode(p.scaleMode);
+
+    // Orbit about the Sun (origin) — same shared OrbitMode clock as the moons.
+    const period = planetOrbitPeriod(this.def, p.orbitMode);
+    if (Number.isFinite(period) && period > 0) {
+      this.orbitAngle = (this.orbitAngle + (dt / period) * Math.PI * 2) % (Math.PI * 2);
+      this.reposition();
+    }
 
     // Shared sun direction (single write — all materials share the instance).
     sunDirectionToward(p.sunWorldPos, this.position, this.sunDirection);
 
     // Idle spin (cosmetic — bands are near-symmetric at these distances).
     if (p.autoRotate) this.planetMesh.rotation.y += dt * this.def.spinRate;
-
-    if (p.scaleMode !== this.scaleMode) this.applyScaleMode(p.scaleMode);
 
     for (const m of this.moons) {
       const period = moonPeriod(m.def, p.orbitMode);
@@ -326,6 +355,18 @@ export class PlanetSystem {
     }
   }
 
+  /** Place the group on its current orbit around the Sun (scene centre).
+   *  The shared `position` instance backs the material's uCenter uniform,
+   *  so ring/moon shadow math follows automatically. */
+  private reposition(): void {
+    this.position.set(
+      Math.cos(this.orbitAngle) * this.orbitRadius,
+      0,
+      -Math.sin(this.orbitAngle) * this.orbitRadius,
+    );
+    this.group.position.copy(this.position);
+  }
+
   /** Rendered radius for the current/given scale mode (haze shell included). */
   private moonRenderRadius(def: MoonDef, mode: ScaleMode = this.scaleMode): number {
     return planetMoonRenderRadius(def, this.def, mode);
@@ -335,6 +376,9 @@ export class PlanetSystem {
   applyScaleMode(mode: ScaleMode): void {
     if (mode === this.scaleMode) return;
     this.scaleMode = mode;
+    // The orbit about the Sun changes radius with the scale mode too.
+    this.orbitRadius = planetOrbitRadius(this.def, mode);
+    this.reposition();
     const [w, h] = this.lastMoonSegments;
     for (const m of this.moons) {
       m.radius = this.moonRenderRadius(m.def, mode);

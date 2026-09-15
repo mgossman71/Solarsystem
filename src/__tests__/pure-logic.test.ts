@@ -22,6 +22,8 @@ import {
   PLANETS,
   planetMoonOrbit,
   planetMoonRadius,
+  planetOrbitPeriod,
+  planetOrbitRadius,
   planetRadius,
   moonPeriod,
 } from '../planets/registry';
@@ -94,12 +96,16 @@ describe('sunDirectionToward', () => {
 // Planet registry invariants
 // ------------------------------------------------------------
 describe('planet registry', () => {
-  it('lists eight planets in orbit order with positive radii', () => {
+  it('lists eight planets in orbit order with positive radii and orbits', () => {
     expect(PLANETS.map((p) => p.id).join(','))
       .toBe('mercury,venus,mars,jupiter,saturn,uranus,neptune,pluto');
     for (const p of PLANETS) {
       expect(planetRadius(p)).toBeGreaterThan(0);
-      expect(p.position.length).toBeGreaterThanOrEqual(0);
+      // Heliocentric: every planet orbits the Sun (origin) at a radius that
+      // clears its own disk in BOTH scale modes.
+      expect(planetOrbitRadius(p, 'explore')).toBeGreaterThan(planetRadius(p));
+      expect(planetOrbitRadius(p, 'real')).toBeGreaterThan(planetRadius(p));
+      expect(Number.isFinite(p.initialOrbitAngle)).toBe(true);
     }
   });
 
@@ -158,6 +164,19 @@ describe('planet registry', () => {
     expect(moonPeriod(phobos, 'paused')).toBe(Infinity);
     expect(moonPeriod(phobos, 'realtime')).toBeCloseTo(phobos.periodDays * 86400, 6);
     expect(moonPeriod(phobos, 'visualized')).toBeCloseTo(phobos.periodDays * 25, 6);
+
+    // Planets orbit the Sun the same way: sidereal period, clock-mode scaled.
+    const mercury = PLANETS.find((p) => p.id === 'mercury')!;
+    expect(planetOrbitPeriod(mercury, 'paused')).toBe(Infinity);
+    expect(planetOrbitPeriod(mercury, 'realtime')).toBeCloseTo(mercury.orbitPeriodDays * 86400, 5);
+    expect(planetOrbitPeriod(mercury, 'visualized')).toBeLessThan(planetOrbitPeriod(mercury, 'realtime'));
+    // Kepler ordering: with the real orbit radius sorted descending, the
+    // period shrinks with it.
+    const byRadius = [...PLANETS].sort((a, b) => b.realOrbit - a.realOrbit);
+    for (let i = 1; i < byRadius.length; i++) {
+      expect(planetOrbitPeriod(byRadius[i], 'realtime'))
+        .toBeLessThan(planetOrbitPeriod(byRadius[i - 1], 'realtime'));
+    }
   });
 
   it('keeps the star shell behind the farthest real-scale body', () => {
@@ -166,10 +185,10 @@ describe('planet registry', () => {
     // front of the outer moons.
     let farthestReal = 0;
     for (const p of PLANETS) {
-      const posLen = Math.hypot(...p.position);
+      const orbit = planetOrbitRadius(p, 'real');
       const outerMoon = p.moons.reduce((a, m) => Math.max(a, planetMoonOrbit(m, 'real')), 0);
       const span = p.ring ? p.ring.outer : 0;
-      farthestReal = Math.max(farthestReal, posLen + Math.max(outerMoon, span));
+      farthestReal = Math.max(farthestReal, orbit + Math.max(outerMoon, span));
     }
     expect(STAR_FIELD_RADIUS_MIN).toBeGreaterThan(farthestReal);
   });

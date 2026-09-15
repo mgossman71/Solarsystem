@@ -665,7 +665,7 @@ reframe + label · quality tier swap (segments + 1k/2k texture) · Moon on/off t
 
 ### 2) Sun visuals → `src/sun/Sun.ts`
 Give the `Sun` class: photosphere `mesh` + `material`, `corona` sprite, `place()`
-(`direction × SUN_DISTANCE`), `load(loader)`, `setCoronaOpacity(o)`, `setDebugMode(n)`,
+(parked at the system centre — the fixed origin), `load(loader)`, `setCoronaOpacity(o)`, `setDebugMode(n)`,
 `swapGeometry(seg)`/`setTexture(tex)`. `SunLightingState` (az/El→direction) stays in
 `lighting/SunLighting.ts`. Sun **UI** (`setupSunUI`) → `src/ui/SunPanel.ts` in step 5.
 Visual checklist: apparent size (~0.5°), limb darkening, granulation, **bloom** (Sun only),
