@@ -78,6 +78,10 @@ export interface PlanetDef {
   exploreOrbit: number;
   /** Orbit radius about the Sun (scene units) — Real Scale mode. */
   realOrbit: number;
+  /** Orbit inclination to the ecliptic, degrees (J2000 value; 0 = in-plane). */
+  orbitInclinationDeg?: number;
+  /** Longitude of ascending node, degrees (orients the tilt about up). */
+  orbitNodeDeg?: number;
   /** rad — starting orbit angle (preserves the legacy composition). */
   initialOrbitAngle: number;
   /** Cosmetic idle spin, rad/s (signed — negative = retrograde spin, Venus). */
@@ -108,6 +112,7 @@ export const PLANETS: readonly PlanetDef[] = [
     spinRate: 0.002, fill: 0.02, limb: 0.05,
     placeholder: [128, 120, 113],
     moonMinRadius: 0.12,
+    orbitInclinationDeg: 7.005, orbitNodeDeg: 48.331,
     moons: [],
   },
   {
@@ -117,6 +122,7 @@ export const PLANETS: readonly PlanetDef[] = [
     spinRate: -0.001, fill: 0.04, limb: 0.08,
     placeholder: [216, 190, 150],
     moonMinRadius: 0.12,
+    orbitInclinationDeg: 3.395, orbitNodeDeg: 76.680,
     moons: [],
   },
   {
@@ -126,6 +132,7 @@ export const PLANETS: readonly PlanetDef[] = [
     spinRate: 0.0025, fill: 0.02, limb: 0.05,
     placeholder: [181, 98, 64],
     moonMinRadius: 0.12,
+    orbitInclinationDeg: 1.850, orbitNodeDeg: 49.559,
     moons: [
       { id: 'phobos', name: 'Phobos', radiusKm: 11.265, orbitKm: 9376,   periodDays: 0.3189, initialAngle: 0.4, exploreOrbit: 1.6 },
       { id: 'deimos', name: 'Deimos', radiusKm: 6.2,    orbitKm: 23463,  periodDays: 1.2624, initialAngle: 3.1, exploreOrbit: 2.4 },
@@ -138,6 +145,7 @@ export const PLANETS: readonly PlanetDef[] = [
     spinRate: 0.006, fill: 0.04, limb: 0.10,
     placeholder: [196, 162, 128],
     moonMinRadius: 0.35,
+    orbitInclinationDeg: 1.303, orbitNodeDeg: 100.464,
     moons: [
       { id: 'io',       name: 'Io',       radiusKm: 1821.6, orbitKm: 421800,  periodDays: 1.7691, initialAngle: 0.9, exploreOrbit: 14 },
       { id: 'europa',   name: 'Europa',   radiusKm: 1560.8, orbitKm: 671100,  periodDays: 3.5512, initialAngle: 2.7, exploreOrbit: 17 },
@@ -152,6 +160,7 @@ export const PLANETS: readonly PlanetDef[] = [
     spinRate: 0.0025, fill: 0.04, limb: 0.10,
     placeholder: [206, 188, 152],
     moonMinRadius: 0.32,
+    orbitInclinationDeg: 2.485, orbitNodeDeg: 113.665,
     ring: {
       inner: 88211 / KM_PER_UNIT,     // C-ring inner edge
       outer: 135001 / KM_PER_UNIT,    // A-ring outer edge
@@ -177,6 +186,7 @@ export const PLANETS: readonly PlanetDef[] = [
     spinRate: 0.002, fill: 0.04, limb: 0.08,
     placeholder: [150, 199, 213],
     moonMinRadius: 0.18,
+    orbitInclinationDeg: 0.773, orbitNodeDeg: 74.006,
     moons: [
       { id: 'miranda',  name: 'Miranda',  radiusKm: 235.8, orbitKm: 129390, periodDays: 1.413,  initialAngle: 1.1, exploreOrbit: 5.5 },
       { id: 'ariel',    name: 'Ariel',    radiusKm: 578.9, orbitKm: 190900, periodDays: 2.520,  initialAngle: 2.9, exploreOrbit: 6.5 },
@@ -192,6 +202,7 @@ export const PLANETS: readonly PlanetDef[] = [
     spinRate: 0.002, fill: 0.04, limb: 0.08,
     placeholder: [76, 107, 194],
     moonMinRadius: 0.2,
+    orbitInclinationDeg: 1.770, orbitNodeDeg: 131.784,
     moons: [
       // Triton: the only large moon on a RETROGRADE orbit.
       { id: 'triton', name: 'Triton', radiusKm: 1353.4, orbitKm: 354800, periodDays: 5.877, initialAngle: 2.2, retrograde: true, exploreOrbit: 5.5, keepTrueSize: true },
@@ -204,6 +215,7 @@ export const PLANETS: readonly PlanetDef[] = [
     spinRate: 0.0012, fill: 0.02, limb: 0.05,
     placeholder: [189, 162, 138],
     moonMinRadius: 0.1,
+    orbitInclinationDeg: 17.16, orbitNodeDeg: 110.303,
     moons: [
       // Charon is nearly half Pluto's diameter — the "binary" look is real,
       // so both keep their true sizes in Exploration mode.

@@ -15,14 +15,16 @@ import { starVertexShader, starFragmentShader } from './shaders/starfield';
 /**
  * Build the additive star-sprite backdrop and add it to the scene.
  *
- * Stars are placed on a shell 1000–1150 units out (STAR_FIELD_RADIUS_*) —
- * beyond the farthest body in either scale mode (Iapetus in Real scale ≈ 860
- * from the origin) — so they always sit behind every body and read as an
- * infinitely distant skybox, never between the camera and a planet (additive
- * points can't be occluded by the transparent rings, so stars in front of
- * Saturn's outer moons would otherwise show through them). `starCount` is
- * tier-driven (20k desktop / 13k balanced / 8.5k performance): the stars are
- * additive point sprites, so the count is a direct fill-rate cost.
+ * Stars are placed on a far shell (STAR_FIELD_RADIUS_*, ~12000–13000) — beyond
+ * the farthest body AND beyond the highest (top-down System) camera position,
+ * so they always sit behind every body and read as an infinitely distant
+ * skybox, never between the camera and a planet. (Additive points can't be
+ * occluded by the transparent rings, so stars in front of Saturn's outer moons
+ * would otherwise show through them; and if the shell sat INSIDE the top-down
+ * camera, the whole star sphere would render as a giant ball around the
+ * planets — see sceneScale.ts.) `starCount` is tier-driven (20k desktop / 13k
+ * balanced / 8.5k performance): the stars are additive point sprites, so the
+ * count is a direct fill-rate cost.
  */
 export function createStarField(scene: THREE.Scene, starCount: number): THREE.Points {
   const positions = new Float32Array(starCount * 3);

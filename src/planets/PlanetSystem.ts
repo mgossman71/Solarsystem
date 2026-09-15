@@ -52,6 +52,7 @@ import {
   planetOrbitRadius,
   planetRadius,
 } from './registry';
+import { orbitPosition } from './orbital';
 import { planetFragmentShader, planetVertexShader } from './shaders/planet';
 import { createRingGeometry, ringFragmentShader, ringVertexShader } from './shaders/rings';
 import { hazeFragmentShader, hazeVertexShader } from './shaders/haze';
@@ -132,10 +133,13 @@ export class PlanetSystem {
     // starting at def.initialOrbitAngle in the Exploration radius.
     this.orbitAngle = def.initialOrbitAngle;
     this.orbitRadius = def.exploreOrbit;
-    this.position = new THREE.Vector3(
-      Math.cos(this.orbitAngle) * this.orbitRadius,
-      0,
-      -Math.sin(this.orbitAngle) * this.orbitRadius,
+    this.position = new THREE.Vector3();
+    orbitPosition(
+      this.orbitAngle,
+      this.orbitRadius,
+      THREE.MathUtils.degToRad(def.orbitInclinationDeg ?? 0),
+      THREE.MathUtils.degToRad(def.orbitNodeDeg ?? 0),
+      this.position,
     );
     this.group = new THREE.Group();
     this.group.position.copy(this.position);
@@ -359,10 +363,12 @@ export class PlanetSystem {
    *  The shared `position` instance backs the material's uCenter uniform,
    *  so ring/moon shadow math follows automatically. */
   private reposition(): void {
-    this.position.set(
-      Math.cos(this.orbitAngle) * this.orbitRadius,
-      0,
-      -Math.sin(this.orbitAngle) * this.orbitRadius,
+    orbitPosition(
+      this.orbitAngle,
+      this.orbitRadius,
+      THREE.MathUtils.degToRad(this.def.orbitInclinationDeg ?? 0),
+      THREE.MathUtils.degToRad(this.def.orbitNodeDeg ?? 0),
+      this.position,
     );
     this.group.position.copy(this.position);
   }
