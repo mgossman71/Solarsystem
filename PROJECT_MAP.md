@@ -34,7 +34,7 @@ src/
     mobile.ts              # prefersReducedMotion()
   saturn/ → REMOVED — replaced by planets/
   planets/                 # EVERY planet: generic PlanetSystem class + registry
-    registry.ts            #   NASA/JPL data for 8 planets + 21 moons, scale/clock
+    registry.ts            #   NASA/JPL data for 8 planets + 26 moons, scale/clock
                            #   helpers, lookups (PLANETS, MOON_OWNER, …)
     PlanetSystem.ts        #   planet body + optional rings + moons: setup, lazy
                            #   texture loading, per-frame update, scale/quality swaps

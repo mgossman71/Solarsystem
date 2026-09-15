@@ -91,6 +91,22 @@
       background: #8fd0ff;
       box-shadow: 0 0 6px rgba(143, 208, 255, 0.9);
     }
+    /* Moon name pills — same glass pill one step smaller, warm dot so they
+       read as "sub-bodies". Shown only while a planet (or one of its moons)
+       is focused; never in the System overview (see .moon-label usage in
+       updatePlanetLabels). Inherits hover/active/pointer styles from the
+       .planet-label base class above. */
+    .moon-label {
+      padding: 2px 8px 2px 6px;
+      border-radius: 11px;
+      font-size: 10px;
+    }
+    .moon-label .planet-label-dot {
+      width: 5px;
+      height: 5px;
+      background: #ffd9a0;
+      box-shadow: 0 0 6px rgba(255, 217, 160, 0.9);
+    }
     /* ---- Primary bar (desktop, bottom center) ---- */
     .primary-bar {
       position: absolute;
@@ -423,6 +439,45 @@
       cursor: pointer;
     }
 
+    /* Orbit-ring brightness slider (shared by the desktop bar + mobile sheet) */
+    .ring-range {
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.14);
+      outline: none;
+      cursor: pointer;
+    }
+    .ring-range::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid rgba(111, 134, 166, 0.9);
+      box-shadow: 0 0 6px rgba(111, 134, 166, 0.5);
+      cursor: pointer;
+    }
+    .ring-range::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid rgba(111, 134, 166, 0.9);
+      cursor: pointer;
+    }
+    /* Desktop focus-panel: the ring slider fills its row next to the label */
+    .focus-panel .ring-range { flex: 1; min-width: 110px; }
+    /* Mobile sheet: a full-width labelled row */
+    .ring-row { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+    .ring-row .ring-label {
+      font-size: 11px; font-weight: 600; letter-spacing: 0.8px;
+      text-transform: uppercase; color: rgba(255, 255, 255, 0.5); flex: 0 0 auto;
+    }
+    .ring-row .ring-range { flex: 1; }
+
     /* Presets */
     .sun-presets { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 12px; }
     .sun-preset {
@@ -717,6 +772,10 @@
       </div>
     </div>
     <div class="focus-row">
+      <span class="focus-label">Orbit Ring Brightness</span>
+      <input type="range" class="ring-range" data-rings min="0" max="250" step="1" value="250" aria-label="Orbit ring brightness" title="Orbit ring brightness">
+    </div>
+    <div class="focus-row">
       <span class="focus-label">Distance</span>
       <div class="seg-group">
         <button class="seg-btn active" data-scale="explore">Exploration</button>
@@ -778,6 +837,10 @@
           <button class="seg-btn" data-orbit="paused">Paused</button>
           <button class="seg-btn active" data-orbit="visualized">Visualized</button>
           <button class="seg-btn" data-orbit="realtime">Real Time</button>
+        </div>
+        <div class="ring-row">
+          <label class="ring-label" for="ring-brightness-sheet">Orbit Ring Brightness</label>
+          <input type="range" class="ring-range" id="ring-brightness-sheet" data-rings min="0" max="250" step="1" value="250" aria-label="Orbit ring brightness">
         </div>
       </section>
       <section class="sheet-section">

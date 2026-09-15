@@ -147,6 +147,9 @@ export const PLANETS: readonly PlanetDef[] = [
     moonMinRadius: 0.35,
     orbitInclinationDeg: 1.303, orbitNodeDeg: 100.464,
     moons: [
+      // Amalthea: the innermost Jovian satellite (the first Jovian moon
+      // discovered, 1892) — orbits INSIDE Io, so it leads the list.
+      { id: 'amalthea', name: 'Amalthea', radiusKm: 85,     orbitKm: 181360,  periodDays: 1.957,  initialAngle: 2.0, exploreOrbit: 13.5 },
       { id: 'io',       name: 'Io',       radiusKm: 1821.6, orbitKm: 421800,  periodDays: 1.7691, initialAngle: 0.9, exploreOrbit: 14 },
       { id: 'europa',   name: 'Europa',   radiusKm: 1560.8, orbitKm: 671100,  periodDays: 3.5512, initialAngle: 2.7, exploreOrbit: 17 },
       { id: 'ganymede', name: 'Ganymede', radiusKm: 2634.1, orbitKm: 1070412, periodDays: 7.1546, initialAngle: 4.4, exploreOrbit: 21, keepTrueSize: true },
@@ -206,6 +209,9 @@ export const PLANETS: readonly PlanetDef[] = [
     moons: [
       // Triton: the only large moon on a RETROGRADE orbit.
       { id: 'triton', name: 'Triton', radiusKm: 1353.4, orbitKm: 354800, periodDays: 5.877, initialAngle: 2.2, retrograde: true, exploreOrbit: 5.5, keepTrueSize: true },
+      // Nereid: the second notable Neptunean moon — small, dark, and on a
+      // highly eccentric orbit far outside Triton's.
+      { id: 'nereid', name: 'Nereid', radiusKm: 203, orbitKm: 5513400, periodDays: 306.87, initialAngle: 4.8, exploreOrbit: 9 },
     ],
   },
   {
@@ -220,6 +226,14 @@ export const PLANETS: readonly PlanetDef[] = [
       // Charon is nearly half Pluto's diameter — the "binary" look is real,
       // so both keep their true sizes in Exploration mode.
       { id: 'charon', name: 'Charon', radiusKm: 606, orbitKm: 19591, periodDays: 6.387, initialAngle: 0.8, exploreOrbit: 0.55, keepTrueSize: true },
+      // Pluto's four dwarf moons (discovered 2011–2012), in distance order.
+      // All well below Pluto's moonMinRadius floor, so Explore mode renders
+      // them at the floor (visible, correctly ordered) and Real Scale shows
+      // their true (tiny) sizes.
+      { id: 'styx',     name: 'Styx',     radiusKm: 40,  orbitKm: 42100, periodDays: 20.16, initialAngle: 0.5, exploreOrbit: 0.80 },
+      { id: 'nix',      name: 'Nix',      radiusKm: 110, orbitKm: 49500, periodDays: 24.85, initialAngle: 1.9, exploreOrbit: 0.95 },
+      { id: 'kerberos', name: 'Kerberos', radiusKm: 55,  orbitKm: 57700, periodDays: 32.34, initialAngle: 3.3, exploreOrbit: 1.10 },
+      { id: 'hydra',    name: 'Hydra',    radiusKm: 70,  orbitKm: 64900, periodDays: 39.36, initialAngle: 5.0, exploreOrbit: 1.25 },
     ],
   },
 ];

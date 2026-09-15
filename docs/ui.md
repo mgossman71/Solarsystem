@@ -35,6 +35,21 @@ focus (including a pending/deferred Earth focus).
 #sheet-handle #sheet-close #primary-bar #sun-panel #sun-pad #sun-knob #sun-az #sun-el
 #sun-az-val #sun-el-val #sun-softfill`
 
+## Name labels (System overview + planet views)
+All label pills live in the single `#planet-labels` layer (`pointer-events:none`;
+each pill re-enables pointer-events) and are projected to screen space every frame
+by `updatePlanetLabels()`. Behind-camera / off-viewport pills are culled (NDC
+checks). Clicking a pill flies to its body — the same delegated `[data-focus]`
+→ `setFocus()` path as the focus buttons.
+- **Planet pills** (Earth + the registry planets): shown only in the **System
+  overview** with the Labels toggle on.
+- **Moon pills** (`.moon-label`, one per registry moon + Earth's special-case
+  Moon): shown only while a **planet or one of its moons is focused** —
+  **never** in the System overview
+  (27 moon pills over 9 planet dots would clutter it). The focused moon's own pill is
+  hidden (it would sit dead-centre on the body being viewed); the siblings stay
+  visible so you can hop between moons by clicking.
+
 ## Behaviors
 - Selection uses a **still + short-tap** test (≤ 350 ms, ≤ 6 px) so drags never select.
 - `body.interacting` dims secondary chrome; restores ~0.9 s after release.

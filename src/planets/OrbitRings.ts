@@ -20,6 +20,26 @@ export const ORBIT_RING_OPACITY = 0.3;
 export const ORBIT_RING_COLOR = 0x6f86a6;
 
 /**
+ * Brightness of the guide rings, expressed as a multiplier on ORBIT_RING_COLOR.
+ * Opacity stays fixed at ORBIT_RING_OPACITY — "brightness" here means colour
+ * intensity (dark→bright), not alpha. 1.0 reproduces the original look exactly,
+ * 0 is invisible (black) and 2.5 is near-white.
+ */
+export const ORBIT_RING_BRIGHTNESS_MIN = 0;
+export const ORBIT_RING_BRIGHTNESS_MAX = 2.5;
+// Default = full brightness, so the slider starts at the far right.
+export const ORBIT_RING_BRIGHTNESS_DEFAULT = ORBIT_RING_BRIGHTNESS_MAX;
+
+// Built once at module load; ringColor() below only ever clones it.
+const ORBIT_RING_BASE_COLOR = new THREE.Color(ORBIT_RING_COLOR);
+
+/** The ring colour for a brightness value, clamped to the supported range. */
+export function ringColor(brightness: number): THREE.Color {
+  const b = THREE.MathUtils.clamp(brightness, ORBIT_RING_BRIGHTNESS_MIN, ORBIT_RING_BRIGHTNESS_MAX);
+  return ORBIT_RING_BASE_COLOR.clone().multiplyScalar(b);
+}
+
+/**
  * Build the orbit rings for the given scale mode and add them to the scene.
  * Returns a Group (one `LineLoop` per planet) so the caller can dispose and
  * rebuild it when the mode changes — the radii differ between Exploration and
@@ -27,9 +47,13 @@ export const ORBIT_RING_COLOR = 0x6f86a6;
  * group and calling again; `EarthScene.dispose()` also covers it via the
  * scene traverse (it frees every Line's geometry + material).
  */
-export function createOrbitRings(scene: THREE.Scene, mode: ScaleMode): THREE.Group {
+export function createOrbitRings(
+  scene: THREE.Scene,
+  mode: ScaleMode,
+  brightness: number = ORBIT_RING_BRIGHTNESS_DEFAULT,
+): THREE.Group {
   const material = new THREE.LineBasicMaterial({
-    color: ORBIT_RING_COLOR,
+    color: ringColor(brightness),
     transparent: true,
     opacity: ORBIT_RING_OPACITY,
     depthWrite: false, // don't write depth; the opaque bodies/rings occlude correctly
@@ -77,4 +101,22 @@ export function createOrbitRings(scene: THREE.Scene, mode: ScaleMode): THREE.Gro
 
   scene.add(group);
   return group;
+}
+
+/**
+ * Live-update the brightness of an already-built ring group without rebuilding
+ * its geometry. All rings in the group share one material (see
+ * createOrbitRings), so a single colour write covers every ring — cheap enough
+ * to run on each slider tick. Opacity is intentionally left untouched.
+ */
+export function setRingBrightness(group: THREE.Group, brightness: number): void {
+  const line = group.children[0] as THREE.Line | undefined;
+  const mat = line?.material;
+  if (!mat) return;
+  const color = ringColor(brightness);
+  if (Array.isArray(mat)) {
+    for (const m of mat) (m as THREE.LineBasicMaterial).color.copy(color);
+  } else {
+    (mat as THREE.LineBasicMaterial).color.copy(color);
+  }
 }
