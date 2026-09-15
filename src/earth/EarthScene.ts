@@ -48,7 +48,7 @@ import {
 import { prefersReducedMotion } from '../config/mobile';
 import { sunVertexShader, sunFragmentShader } from '../sun/shaders/sun';
 import { createStarField } from './StarField';
-import { createOrbitRings } from '../planets/OrbitRings';
+import { createOrbitRings, setRingBrightness as applyRingBrightness, ORBIT_RING_BRIGHTNESS_MIN, ORBIT_RING_BRIGHTNESS_MAX, ORBIT_RING_BRIGHTNESS_DEFAULT } from '../planets/OrbitRings';
 import { earthVertexShader, earthFragmentShader } from '../earth/shaders/earth';
 import { cloudVertexShader, cloudFragmentShader } from '../earth/shaders/cloud';
 import { atmosphereVertexShader, atmosphereFragmentShader } from '../earth/shaders/atmosphere';
@@ -165,7 +165,7 @@ export class EarthScene {
   private resetAnimId: number | null = null;
 
   // Respect reduced-motion users from the very first frame: no idle spin.
-  private state = { autoRotate: !prefersReducedMotion(), atmosphere: true, clouds: true, stars: true, autoSun: false, fullDaylight: false, planetLabels: true };
+  private state = { autoRotate: !prefersReducedMotion(), atmosphere: true, clouds: true, stars: true, autoSun: false, fullDaylight: false, planetLabels: true, ringBrightness: ORBIT_RING_BRIGHTNESS_DEFAULT };
 
   // ------------------------------------------------------------
   // ADAPTIVE QUALITY (see Quality.ts)
@@ -218,6 +218,12 @@ export class EarthScene {
   /** One DOM pill per planet in `#planet-labels` — projected to screen space
    *  every frame in updatePlanetLabels(); removed from the DOM in dispose(). */
   private planetLabelEls: { focus: Focus; name: string; el: HTMLElement }[] = [];
+  /** One DOM pill per registry moon (plus Earth's special-case Moon) in
+   *  `#planet-labels` — shown only while its owner planet (or one of its
+   *  moons) is focused, NEVER in the System overview (27 pills over 9 planet
+   *  dots would be clutter); projected every frame in updatePlanetLabels();
+   *  removed from the DOM in dispose() alongside the planet pills. */
+  private moonLabelEls: { focus: Focus; name: string; owner: Focus; el: HTMLElement }[] = [];
   /** Scratch NDC vector for the per-frame label projection (no hot-path
    *  allocations — same discipline as `this._v`). */
   private _labelNdc = new THREE.Vector3();
@@ -286,7 +292,7 @@ export class EarthScene {
   // Supported: ?debug  ?clouds=0|1  ?atmosphere=0|1  ?stars=0|1
   //            ?rotate=0|1  ?sun=az,el  ?mode=1|2|3  ?sunray=1
   //            ?focus=earth|moon|sun  ?orbit=paused|visualized|realtime
-  //            ?scale=explore|real
+  //            ?scale=explore|real  ?rings=0..2
   private debugEnabled = false;
   /** The ?debug panel element (on <body>) — removed in dispose(). */
   private debugPanel: HTMLElement | null = null;
@@ -320,6 +326,15 @@ export class EarthScene {
     if (params.get('rotate') === '0') this.state.autoRotate = false;
     if (params.get('labels') === '0') this.state.planetLabels = false;
     if (params.get('labels') === '1') this.state.planetLabels = true;
+    const ringsParam = params.get('rings');
+    if (ringsParam !== null) {
+      const r = Number(ringsParam);
+      if (Number.isFinite(r)) {
+        this.state.ringBrightness = THREE.MathUtils.clamp(
+          r, ORBIT_RING_BRIGHTNESS_MIN, ORBIT_RING_BRIGHTNESS_MAX,
+        );
+      }
+    }
     const modeParam = params.get('mode');
     if (modeParam === '1' || modeParam === '2' || modeParam === '3') {
       this.pendingDebugMode = Number(modeParam);
@@ -709,7 +724,7 @@ export class EarthScene {
 
     // Faint orbit guide rings (see OrbitRings.ts) — orientation for the
     // top-down System overview. Rebuilt on scale-mode change (radii differ).
-    this.orbitRings = createOrbitRings(this.scene, this.scaleMode);
+    this.orbitRings = createOrbitRings(this.scene, this.scaleMode, this.state.ringBrightness);
 
     // Debug: Sun direction ray (hidden unless toggled) — drawn at the Earth
     // center along the shared apparent Sun direction (toward the Sun at the
@@ -1027,6 +1042,17 @@ export class EarthScene {
     // Single delegated handler — survives any responsive re-parenting.
     document.body.addEventListener('click', this.uiHandler, { signal: this.ac.signal });
 
+    // Orbit-ring brightness: every layout's slider (desktop bar + mobile sheet)
+    // drives the same value; setRingBrightness() re-syncs all of them.
+    document.querySelectorAll('[data-rings]').forEach((el) => {
+      const input = el as HTMLInputElement;
+      input.addEventListener(
+        'input',
+        () => this.setRingBrightness(parseFloat(input.value) / 100),
+        { signal: this.ac.signal },
+      );
+    });
+
     // Moon pickers (desktop focus panel + mobile sheet): generate the
     // buttons from the registry; visibility follows the focused planet.
     const focusMoons = document.querySelector('#focus-moons') as HTMLElement | null;
@@ -1215,6 +1241,7 @@ export class EarthScene {
     sync('atmosphere', this.state.atmosphere);
     sync('clouds', this.state.clouds);
     sync('labels', this.state.planetLabels);
+    this.syncRingUI();
   }
 
   /**
@@ -1882,7 +1909,34 @@ export class EarthScene {
       }
       this.orbitRings = null;
     }
-    this.orbitRings = createOrbitRings(this.scene, this.scaleMode);
+    this.orbitRings = createOrbitRings(this.scene, this.scaleMode, this.state.ringBrightness);
+  }
+
+  /**
+   * Update the orbit-ring brightness (colour intensity) live — no geometry
+   * rebuild. Clamps to the supported range, stores it in state, applies it to
+   * the built rings (if any), and reflects it in every layout's slider.
+   * Opacity stays fixed (see OrbitRings.ts); only the colour intensity changes.
+   */
+  private setRingBrightness(brightness: number): void {
+    const b = THREE.MathUtils.clamp(
+      brightness,
+      ORBIT_RING_BRIGHTNESS_MIN,
+      ORBIT_RING_BRIGHTNESS_MAX,
+    );
+    this.state.ringBrightness = b;
+    if (this.orbitRings) applyRingBrightness(this.orbitRings, b);
+    this.syncRingUI();
+  }
+
+  /** Reflect state.ringBrightness into every layout's slider (desktop bar + sheet). */
+  private syncRingUI(): void {
+    const v = String(Math.round(this.state.ringBrightness * 100));
+    document.querySelectorAll('[data-rings]').forEach((el) => {
+      const input = el as HTMLInputElement;
+      // Don't fight the slider the user is currently dragging.
+      if (document.activeElement !== input) input.value = v;
+    });
   }
 
   // ------------------------------------------------------------
@@ -2006,23 +2060,61 @@ export class EarthScene {
     // add it explicitly (it appears first in the DOM, then Mercury … Pluto).
     mk('earth', 'Earth');
     for (const def of PLANETS) mk(def.id, def.name);
+    // Moons: one pill per registry moon, tagged with its owner planet. Hidden
+    // until updatePlanetLabels() reveals them for the focused planet (or one
+    // of its moons) — NEVER in the System overview, where 27 pills over 9
+    // sub-pixel dots would clutter the view. Clicking flies to that moon via
+    // the same delegated [data-focus] → setFocus() path as the planet pills.
+    const mkMoon = (id: Focus, name: string, owner: Focus) => {
+      const el = document.createElement('span');
+      el.className = 'planet-label moon-label';
+      el.textContent = name;
+      el.style.display = 'none';
+      el.dataset.focus = id;
+      el.setAttribute('role', 'button');
+      el.setAttribute('title', `Fly to ${name}`);
+      const dot = document.createElement('i');
+      dot.className = 'planet-label-dot';
+      el.prepend(dot);
+      layer.appendChild(el);
+      this.moonLabelEls.push({ focus: id, name, owner, el });
+    };
+    // Earth's Moon: a special-case body (own mesh, tracked by `moonPosition`)
+    // that is NOT in the registry — add it explicitly, first (Earth leads
+    // the planet order, and its Moon is its only moon).
+    mkMoon('moon', 'Moon', 'earth');
+    for (const def of PLANETS) {
+      for (const m of def.moons) mkMoon(m.id, m.name, def.id);
+    }
   }
 
-  /** Per-frame: hide every label unless we're in the wide System view with
-   *  labels enabled — then project each planet's live world position to
-   *  screen space and position its pill just above the dot. Labels behind
-   *  the camera or off the viewport are hidden (NDC z > 1 / out of range). */
+  /** Per-frame: hide the planet labels unless we're in the wide System view
+   *  with labels enabled — then project each planet's live world position to
+   *  screen space and position its pill just above the dot. The moon labels
+   *  use the same mechanism but show only while a planet (or one of its
+   *  moons) is focused — never in the System overview. Labels behind the
+   *  camera or off the viewport are hidden (NDC z > 1 / out of range). */
   private updatePlanetLabels(): void {
-    if (this.planetLabelEls.length === 0) return;
+    if (this.planetLabelEls.length === 0 && this.moonLabelEls.length === 0) return;
     // project() reads camera.matrixWorldInverse, normally only refreshed
     // inside renderer.render() — refresh it from the camera's current
     // transform so the projection is exact for THIS frame.
     this.camera.updateMatrixWorld();
-    const show = this.focus === 'system' && this.state.planetLabels;
+    const planetShow = this.focus === 'system' && this.state.planetLabels;
+    // Moon pills: same "Labels" toggle, but only while we are actually AT
+    // that planet — focused on the planet itself or on one of its moons (so
+    // the sibling labels let you hop between moons by clicking). Never in
+    // the System overview — that view stays planet-names-only.
+    const moonOwner = this.state.planetLabels
+      ? (this.focus === 'earth' ? 'earth'
+        : isPlanetFocus(this.focus) ? this.focus
+        : isPlanetMoonFocus(this.focus) ? MOON_OWNER[this.focus]
+        : null)
+      : null;
     const w = this.renderer.domElement.clientWidth;
     const h = this.renderer.domElement.clientHeight;
     for (const p of this.planetLabelEls) {
-      if (!show) {
+      if (!planetShow) {
         if (p.el.style.display !== 'none') p.el.style.display = 'none';
         continue;
       }
@@ -2051,6 +2143,42 @@ export class EarthScene {
       p.el.style.display = '';
       p.el.style.left = `${x}px`;
       p.el.style.top = `${y}px`;
+    }
+    for (const m of this.moonLabelEls) {
+      if (!moonOwner || m.owner !== moonOwner) {
+        if (m.el.style.display !== 'none') m.el.style.display = 'none';
+        continue;
+      }
+      // The pill of the body we are looking AT would sit dead-centre on its
+      // disk — hide it (the moon-picker buttons + primary bar still name it).
+      if (m.focus === this.focus) {
+        if (m.el.style.display !== 'none') m.el.style.display = 'none';
+        continue;
+      }
+      // Live world position — registry moons via the owner's PlanetSystem
+      // (the same moonWorld() the focus-pose and hit-proxy code track,
+      // refreshed each frame by sys.update() before this runs in animate());
+      // Earth's Moon is the special-case body tracked by `moonPosition`.
+      if (m.focus === 'moon') {
+        this._v.copy(this.moonPosition);
+      } else {
+        const sys = this.planets.get(m.owner);
+        const mw = sys ? sys.moonWorld(m.focus, this._v) : null;
+        if (!sys || !mw) {
+          m.el.style.display = 'none';
+          continue;
+        }
+      }
+      this._labelNdc.copy(this._v).project(this.camera);
+      if (this._labelNdc.z > 1 || this._labelNdc.z < -1
+        || this._labelNdc.x < -1.05 || this._labelNdc.x > 1.05
+        || this._labelNdc.y < -1.05 || this._labelNdc.y > 1.05) {
+        m.el.style.display = 'none';
+        continue;
+      }
+      m.el.style.display = '';
+      m.el.style.left = `${(this._labelNdc.x + 1) * 0.5 * w}px`;
+      m.el.style.top = `${(1 - this._labelNdc.y) * 0.5 * h}px`;
     }
   }
 
@@ -2710,6 +2838,8 @@ export class EarthScene {
     // re-instantiation against the same document appends one set, not two.
     for (const p of this.planetLabelEls) p.el.remove();
     this.planetLabelEls.length = 0;
+    for (const m of this.moonLabelEls) m.el.remove();
+    this.moonLabelEls.length = 0;
     if (this.animationId != null) cancelAnimationFrame(this.animationId);
     this.animationId = null;
     if (this.resetAnimId != null) cancelAnimationFrame(this.resetAnimId);

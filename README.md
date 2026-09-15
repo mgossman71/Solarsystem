@@ -40,9 +40,9 @@ The app is a static site — `npm run build` + `npm run preview` (or serving `di
 |--------|-----|
 | Orbit | Drag (mouse) / one-finger touch |
 | Zoom | Scroll / pinch |
-| Focus a body | Click/tap the body (or its name label in the System view), or use the **System · Sun · Mercury … Pluto** buttons; moons via the **Moons** picker (shown when a planet is focused) |
+| Focus a body | Click/tap the body (or its name label — planet labels in the System view, moon labels once a planet is focused), or use the **System · Sun · Mercury … Pluto** buttons; moons via the **Moons** picker (shown when a planet is focused) |
 | Sun position | **Sun Lighting** panel: azimuth/elevation pad or sliders, presets (**Day · Sunset · Night · Backlit**), **Full Daylight**, **Reset Sun**, **Auto** (Sun orbits the camera) |
-| Toggles | **Atmosphere**, **Clouds**, **Stars**, **Auto Rotate**, **Labels**, **Fullscreen**, **Reset** (back to the System overview) |
+| Toggles | **Atmosphere**, **Clouds**, **Stars**, **Auto Rotate**, **Labels** (planet names in the System view, moon names while a planet or one of its moons is focused), **Fullscreen**, **Reset** (back to the System overview) |
 | Quality | **Auto · High · Balanced · Performance** |
 | Moon orbit | **Paused · Visualized · Real Time** |
 | Scale | **Exploration · Real Scale** |
@@ -70,7 +70,7 @@ Useful for deterministic screenshots / QA / debugging. All optional; defaults ap
 | `sun` | `azimuth,elevation` (e.g. `90,20`) | Initial Sun direction (az −180…180, el −90…90; clamped) |
 | `orbit` | `paused \| visualized \| realtime` | Moon orbit mode |
 | `scale` | `explore \| real` | Exploration vs. real relative scale |
-| `clouds` / `atmosphere` / `stars` / `rotate` / `labels` | `0 \| 1` | Show / hide each layer, or auto-rotate / planet name labels |
+| `clouds` / `atmosphere` / `stars` / `rotate` / `labels` | `0 \| 1` | Show / hide each layer, or auto-rotate / name labels (planet + moon) |
 | `mode` | `1 \| 2 \| 3` | Debug shading mode |
 | `sunray` / `frontlight` / `softfill` | `1` | Enable each optional lighting effect |
 | `debug` | _(present)_ | Show the debug panel |

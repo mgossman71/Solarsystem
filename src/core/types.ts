@@ -7,12 +7,13 @@ export type Focus = 'system' |
   'earth' | 'moon' | 'sun' |
   // planets (orbit order, Pluto last)
   'mercury' | 'venus' | 'mars' | 'jupiter' | 'saturn' | 'uranus' | 'neptune' | 'pluto' |
-  // moons (Mars, Jupiter, Saturn, Uranus, Neptune, Pluto)
+  // moons (Mars, Jupiter, Saturn, Uranus, Neptune, Pluto — in orbit order)
   'phobos' | 'deimos' |
-  'io' | 'europa' | 'ganymede' | 'callisto' |
+  'amalthea' | 'io' | 'europa' | 'ganymede' | 'callisto' |
   'mimas' | 'enceladus' | 'tethys' | 'dione' | 'rhea' | 'titan' | 'iapetus' |
   'miranda' | 'ariel' | 'umbriel' | 'titania' | 'oberon' |
-  'triton' | 'charon';
+  'triton' | 'nereid' |
+  'charon' | 'styx' | 'nix' | 'kerberos' | 'hydra';
 
 /** All focusable planets, in orbit order (source: `src/planets/registry`). */
 export const PLANET_FOCUS: readonly Focus[] = [
@@ -22,10 +23,11 @@ export const PLANET_FOCUS: readonly Focus[] = [
 /** Every individually focusable moon (in orbit order per planet). */
 export const MOON_FOCUS: readonly Focus[] = [
   'phobos', 'deimos',
-  'io', 'europa', 'ganymede', 'callisto',
+  'amalthea', 'io', 'europa', 'ganymede', 'callisto',
   'mimas', 'enceladus', 'tethys', 'dione', 'rhea', 'titan', 'iapetus',
   'miranda', 'ariel', 'umbriel', 'titania', 'oberon',
-  'triton', 'charon',
+  'triton', 'nereid',
+  'charon', 'styx', 'nix', 'kerberos', 'hydra',
 ] as const;
 
 export function isPlanetFocus(f: Focus): boolean {
