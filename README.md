@@ -12,14 +12,14 @@ An interactive, cinematic 3D **solar system** in the browser — starting from a
 - **System overview (the default view)** — a straight-down, Sun-centred framing of the whole system with faint **orbit guide rings** (one per planet, in its own inclined plane) and optional **planet name labels** that are themselves clickable and fly you to that planet.
 - **Selection & focus** — click/tap any body, its label, or the **System · Sun · planets** buttons to focus; *Real Scale* shows true relative sizes/distances.
 - **Adaptive quality** — `high / balanced / performance` tiers (pixel-ratio cap, star count, tessellation, bloom, MSAA, texture set), auto-detected from measurable device signals (not user-agent sniffing) with a runtime FPS guard that steps down when a device can't keep up.
-- **Mobile-first UI** — touch orbit/pinch-zoom, a draggable bottom "Controls" sheet, a touch sun pad (azimuth/elevation), safe-area insets, and respect for `prefers-reduced-motion`.
+- **Mobile-first UI** — one-finger look / pinch-zoom / two-finger fly, a draggable bottom "Controls" sheet, a touch sun pad (azimuth/elevation), safe-area insets, and respect for `prefers-reduced-motion`.
 
 ## Tech stack
 
 - **TypeScript** (strict) + **Vite 8** (rolldown)
 - **Three.js** — `WebGLRenderer`, ACES tone mapping, `UnrealBloomPass`
 - **Custom GLSL shaders** for Earth day/night blend, cloud shading, atmosphere fresnel, star field, and Moon phase
-- **OrbitControls** (damped, pan disabled)
+- **Custom free-fly camera** — `RoamController` replaces Three.js `OrbitControls`: no orbit pivot, drag-to-look, wheel/pinch-to-dolly, WASD/QE to fly, with soft per-body colliders
 - **No UI framework** — vanilla DOM for the panels, sheet, and toggles
 
 ## Quick start
@@ -38,9 +38,11 @@ The app is a static site — `npm run build` + `npm run preview` (or serving `di
 
 | Action | How |
 |--------|-----|
-| Orbit | Drag (mouse) / one-finger touch |
-| Zoom | Scroll / pinch |
-| Focus a body | Click/tap the body (or its name label — planet labels in the System view, moon labels once a planet is focused), or use the **System · Sun · Mercury … Pluto** buttons; moons via the **Moons** picker (shown when a planet is focused) |
+| Look | Left-drag (mouse) / one-finger touch — free 360° view, no orbit pivot |
+| Zoom (dolly) | Scroll / vertical trackpad swipe / pinch — slide along your line of sight |
+| Yaw | Horizontal trackpad swipe — spin left/right about your view |
+| Fly (move) | **W A S D** to drive, **Q / E** for down/up, **Shift** to boost; two-finger drag on touch |
+| Focus a body | Click/tap **any** body — every planet and moon is a global click target (plus name labels and the **System · Sun · Mercury … Pluto** buttons; moons also via the **Moons** picker) |
 | Sun position | **Sun Lighting** panel: azimuth/elevation pad or sliders, presets (**Day · Sunset · Night · Backlit**), **Full Daylight**, **Reset Sun**, **Auto** (Sun orbits the camera) |
 | Toggles | **Atmosphere**, **Clouds**, **Stars**, **Auto Rotate**, **Labels** (planet names in the System view, moon names while a planet or one of its moons is focused), **Fullscreen**, **Reset** (back to the System overview) |
 | Quality | **Auto · High · Balanced · Performance** |
@@ -83,15 +85,17 @@ Example: `?focus=sun&quality=high&sun=90,0&scale=real`.
 index.html                 # Entry HTML + inline UI CSS; loads main.ts
 src/main.ts                # Bootstrap — creates EarthScene, exposes window.__earth
 src/config/
-  camera.ts                # Camera + OrbitControls + System-view framing constants
+  camera.ts                # Camera + free-roam (Roam) + System-view framing constants
   sceneScale.ts            # World-scale constants (orbit radii, Sun, star shell)
   mobile.ts                # Mobile layout constants
 src/core/
   Quality.ts               # Adaptive quality: tiers, auto-detection, texture paths
   types.ts                 # Shared types (Focus, ScaleMode, OrbitMode, …)
 src/earth/
-  EarthScene.ts            # Core: renderer, scene, camera, controls, meshes,
+  EarthScene.ts            # Core: renderer, scene, camera, free-roam, meshes,
                            #   animation loop, UI, quality, sun, moon, labels
+  RoamController.ts        # Free-fly camera (replaces OrbitControls): look, dolly,
+                           #   WASD/QE fly, soft per-body colliders
   StarField.ts             # Additive star-sprite backdrop shell
   shaders/                 # Earth day/night, clouds, atmosphere, starfield GLSL
 src/sun/shaders/sun.ts     # Solar photosphere shader
@@ -121,7 +125,7 @@ docker-compose.yml         # `docker compose up` → http://localhost:3000
 
 - **Type-check / build:** `npx tsc --noEmit` and `npm run build` should both pass cleanly before committing.
 - **Lighting math:** `node scripts/lighting_math_test.mjs` — a headless, WebGL-free test that replays the exact shader pipeline and asserts sun-over-region illumination, a full azimuth/elevation sweep reaching day-side, front-light and white-sphere `N·L` invariants.
-- **Visual:** `npm run dev` and exercise orbit/zoom, focus, sun presets, quality switching, and the mobile bottom sheet in a browser.
+- **Visual:** `npm run dev` and exercise free-roam (drag-look, scroll/pinch dolly, WASD/QE fly), click-to-zoom on any body, sun presets, quality switching, and the mobile bottom sheet in a browser.
 
 ## Docker
 
