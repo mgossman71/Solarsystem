@@ -165,7 +165,7 @@ export class EarthScene {
   private resetAnimId: number | null = null;
 
   // Respect reduced-motion users from the very first frame: no idle spin.
-  private state = { autoRotate: !prefersReducedMotion(), atmosphere: true, clouds: true, stars: true, autoSun: false, fullDaylight: false };
+  private state = { autoRotate: !prefersReducedMotion(), atmosphere: true, clouds: true, stars: true, autoSun: false, fullDaylight: false, planetLabels: true };
 
   // ------------------------------------------------------------
   // ADAPTIVE QUALITY (see Quality.ts)
@@ -212,6 +212,16 @@ export class EarthScene {
    */
   private hitProxies: { mesh: THREE.Mesh; focus: Focus }[] = [];
 
+  // ------------------------------------------------------------
+  // PLANET NAME LABELS (wide "System" overview)
+  // ------------------------------------------------------------
+  /** One DOM pill per planet in `#planet-labels` — projected to screen space
+   *  every frame in updatePlanetLabels(); removed from the DOM in dispose(). */
+  private planetLabelEls: { focus: Focus; name: string; el: HTMLElement }[] = [];
+  /** Scratch NDC vector for the per-frame label projection (no hot-path
+   *  allocations — same discipline as `this._v`). */
+  private _labelNdc = new THREE.Vector3();
+
   // Textures created in loadEarth — material.dispose() does NOT dispose them.
   private textures: THREE.Texture[] = [];
   /** Shared texture loader — planet systems lazy-load their maps through it. */
@@ -246,6 +256,7 @@ export class EarthScene {
     });
     this.setupUI();
     this.setupSunUI();
+    this.setupPlanetLabels();
     this.bindSelection();
     this.createHitProxies();
     if (this.debugEnabled) this.setupDebugPanel();
@@ -290,6 +301,8 @@ export class EarthScene {
     if (params.get('atmosphere') === '0') this.state.atmosphere = false;
     if (params.get('stars') === '0') this.state.stars = false;
     if (params.get('rotate') === '0') this.state.autoRotate = false;
+    if (params.get('labels') === '0') this.state.planetLabels = false;
+    if (params.get('labels') === '1') this.state.planetLabels = true;
     const modeParam = params.get('mode');
     if (modeParam === '1' || modeParam === '2' || modeParam === '3') {
       this.pendingDebugMode = Number(modeParam);
@@ -982,6 +995,10 @@ export class EarthScene {
         }
         this.syncUIButtons();
         break;
+      case 'labels':
+        this.state.planetLabels = !this.state.planetLabels;
+        this.syncUIButtons();
+        break;
       case 'fullscreen': this.toggleFullscreen(); break;
     }
   };
@@ -1177,6 +1194,7 @@ export class EarthScene {
     sync('auto-rotate', this.state.autoRotate);
     sync('atmosphere', this.state.atmosphere);
     sync('clouds', this.state.clouds);
+    sync('labels', this.state.planetLabels);
   }
 
   /**
@@ -1930,6 +1948,86 @@ export class EarthScene {
     return mode === 'real' ? Math.max(0.2, r * 2.5) : Math.max(0.8, r * 1.6);
   }
 
+  // ------------------------------------------------------------
+  // PLANET NAME LABELS (wide "System" overview)
+  // ------------------------------------------------------------
+  /**
+   * Build one DOM pill per planet into `#planet-labels`. In the top-down
+   * System view the true-scale planets are sub-pixel dots (see OrbitRings.ts)
+   * — the labels are the only way to tell them apart, so they exist to point
+   * at those dots. The layer is pointer-events:none: orbit/zoom/tap keep
+   * working on the canvas, and tapping a dot still selects the planet through
+   * the enlarged hit proxies.
+   */
+  private setupPlanetLabels(): void {
+    const layer = document.getElementById('planet-labels');
+    if (!layer) return;
+    const mk = (id: Focus, name: string) => {
+      const el = document.createElement('span');
+      el.className = 'planet-label';
+      el.textContent = name;
+      el.style.display = 'none';
+      // Clickable → fly to that planet. The delegated body click handler
+      // (uiHandler) already maps any [data-focus] element to setFocus();
+      // this is the exact same path the planet buttons in the primary bar use.
+      el.dataset.focus = id;
+      el.setAttribute('role', 'button');
+      el.setAttribute('title', `Fly to ${name}`);
+      const dot = document.createElement('i');
+      dot.className = 'planet-label-dot';
+      el.prepend(dot);
+      layer.appendChild(el);
+      this.planetLabelEls.push({ focus: id, name, el });
+    };
+    // Earth is the special-case body — it is NOT in the PLANETS registry (it
+    // owns its own shader/texture path and is tracked by `this.earthPos`), so
+    // add it explicitly (it appears first in the DOM, then Mercury … Pluto).
+    mk('earth', 'Earth');
+    for (const def of PLANETS) mk(def.id, def.name);
+  }
+
+  /** Per-frame: hide every label unless we're in the wide System view with
+   *  labels enabled — then project each planet's live world position to
+   *  screen space and position its pill just above the dot. Labels behind
+   *  the camera or off the viewport are hidden (NDC z > 1 / out of range). */
+  private updatePlanetLabels(): void {
+    if (this.planetLabelEls.length === 0) return;
+    const show = this.focus === 'system' && this.state.planetLabels;
+    const w = this.renderer.domElement.clientWidth;
+    const h = this.renderer.domElement.clientHeight;
+    for (const p of this.planetLabelEls) {
+      if (!show) {
+        if (p.el.style.display !== 'none') p.el.style.display = 'none';
+        continue;
+      }
+      // Earth is tracked by `this.earthPos` (special-case body, not in
+      // `this.planets`); every other label resolves through its PlanetSystem.
+      if (p.focus === 'earth') this._v.copy(this.earthPos);
+      else {
+        const sys = this.planets.get(p.focus);
+        if (!sys) {
+          p.el.style.display = 'none';
+          continue;
+        }
+        // The system group sits at the planet's live orbit position — the same
+        // `center()` the focus/pose code uses.
+        sys.center(this._v);
+      }
+      this._labelNdc.copy(this._v).project(this.camera);
+      if (this._labelNdc.z > 1 || this._labelNdc.z < -1
+        || this._labelNdc.x < -1.05 || this._labelNdc.x > 1.05
+        || this._labelNdc.y < -1.05 || this._labelNdc.y > 1.05) {
+        p.el.style.display = 'none';
+        continue;
+      }
+      const x = (this._labelNdc.x + 1) * 0.5 * w;
+      const y = (1 - this._labelNdc.y) * 0.5 * h;
+      p.el.style.display = '';
+      p.el.style.left = `${x}px`;
+      p.el.style.top = `${y}px`;
+    }
+  }
+
   /** Keep the moving proxies in lock-step with their bodies (per frame). */
   private updateHitProxies(): void {
     for (const p of this.hitProxies) {
@@ -2534,6 +2632,7 @@ export class EarthScene {
       this.sunMaterial.uniforms.uTime.value = this.clock.elapsedTime;
     }
     this.updateHitProxies();
+    this.updatePlanetLabels();
 
     this.controls.update();
     // Composer path: the scene renders into a linear HDR target (opaque
