@@ -14,7 +14,7 @@ import {
   nextTierDown,
   resolveProfile,
 } from '../core/Quality';
-import { STAR_FIELD_RADIUS_MIN, wrapAzimuth } from '../config/sceneScale';
+import { EARTH_ORBIT_RADIUS, STAR_FIELD_RADIUS_MIN, wrapAzimuth } from '../config/sceneScale';
 import { sunDirectionFromAzEl, sunDirectionToward } from '../lighting/SunLighting';
 import {
   KM_PER_UNIT,
@@ -28,6 +28,7 @@ import {
   moonPeriod,
 } from '../planets/registry';
 import { orbitPosition } from '../planets/orbital';
+import { createOrbitRings, orientOrbitRings, ringPlaneCorrection } from '../planets/OrbitRings';
 
 // ---- Vector3 ≈ [x, y, z] helper (keeps the tests readable) ----
 const expectVec = (v: THREE.Vector3, x: number, y: number, z: number): void => {
@@ -244,6 +245,89 @@ describe('orbitPosition', () => {
       orbitPosition(Math.PI / 2, r, d2r(inclDeg), d2r(nodeDeg), out);
       expect(out.y).toBeCloseTo(r * Math.sin(d2r(inclDeg)), 8);
     }
+  });
+});
+
+// ------------------------------------------------------------
+// Orbit rings (guide geometry)
+// ------------------------------------------------------------
+describe('orbit rings', () => {
+  // computeBoundingSphere() has small numerical error that scales with the
+  // radius (~float precision), so compare RELATIVELY — works for every ring.
+  const expectRadiusNear = (line: THREE.LineLoop, expected: number): void => {
+    line.geometry.computeBoundingSphere();
+    expect(line.geometry.boundingSphere?.radius).not.toBeNull();
+    expect(Math.abs((line.geometry.boundingSphere?.radius ?? NaN) - expected))
+      .toBeLessThan(expected * 1e-6);
+  };
+
+  it('includes Earth\'s ecliptic ring plus one ring per registry planet', () => {
+    for (const mode of ['explore', 'real'] as const) {
+      const group = createOrbitRings(new THREE.Scene(), mode);
+      expect(group.name).toBe('orbitRings');
+      expect(group.children.length).toBe(PLANETS.length + 1);
+      // Earth's ring is the flat ecliptic at EARTH_ORBIT_RADIUS in BOTH modes.
+      expectRadiusNear(group.children[0] as THREE.LineLoop, EARTH_ORBIT_RADIUS);
+      // Every planet ring has the radius its registry entry defines for the
+      // mode, so the planet always sits exactly on its ring.
+      for (let i = 0; i < PLANETS.length; i++) {
+        expectRadiusNear(
+          group.children[i + 1] as THREE.LineLoop,
+          planetOrbitRadius(PLANETS[i], mode),
+        );
+      }
+    }
+  });
+
+  it('ringPlaneCorrection tips a plane to contain an off-plane body', () => {
+    const n = new THREE.Vector3(0, 1, 0);
+    const q = new THREE.Quaternion();
+    const IDENT = new THREE.Quaternion(0, 0, 0, 1);
+
+    // Body already in the ecliptic plane → identity (no rotation).
+    for (const body of [new THREE.Vector3(600, 0, 0), new THREE.Vector3(-123.4, 0, 77.7)]) {
+      expect(ringPlaneCorrection(n, body, q)).toEqual(IDENT);
+    }
+
+    // Body off-plane (any Sun azimuth/elevation) → after the rotation the
+    // plane contains it, and the normal stays unit (ring radius unchanged).
+    const d = new THREE.Vector3();
+    for (const [az, el] of [[150, 18], [30, -60], [0, 45], [179, 89], [-90, -12]] as const) {
+      sunDirectionFromAzEl(az, el, d);
+      ringPlaneCorrection(n, d, q);
+      const n2 = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
+      expect(Math.abs(n2.dot(d))).toBeLessThan(1e-9);
+      expect(n2.length()).toBeCloseTo(1, 9);
+    }
+
+    // Degenerate: body on the ring axis → still ends up in the plane.
+    for (const sign of [1, -1] as const) {
+      ringPlaneCorrection(n, new THREE.Vector3(0, 600 * sign, 0), q);
+      const n2 = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
+      expect(Math.abs(n2.y * sign)).toBeLessThan(1e-9);
+    }
+  });
+
+  it('orients Earth\'s ring through its live position (build + per frame)', () => {
+    const sunDir = new THREE.Vector3();
+    sunDirectionFromAzEl(150, 18, sunDir);
+    const earthBody = sunDir.clone().multiplyScalar(-EARTH_ORBIT_RADIUS);
+    const group = createOrbitRings(new THREE.Scene(), 'explore', 1, earthBody);
+    const ring = group.children[0] as THREE.LineLoop;
+
+    // The ring's current plane normal (base + accumulated quaternion) must be
+    // perpendicular to Earth's position — i.e. Earth lies on the ring —
+    // even though the Sun elevation (18°) takes Earth out of the ecliptic.
+    const n = (ring.userData.baseNormal as THREE.Vector3).applyQuaternion(ring.quaternion);
+    expect(Math.abs(n.dot(earthBody))).toBeLessThan(1e-9);
+
+    // Sun moves (Auto Sun sweep / Full Daylight) → the per-frame pass
+    // re-tilts the SAME ring (no rebuild) to follow Earth.
+    sunDirectionFromAzEl(200, 35, sunDir);
+    earthBody.copy(sunDir).multiplyScalar(-EARTH_ORBIT_RADIUS);
+    orientOrbitRings(group, [earthBody]);
+    n.copy(ring.userData.baseNormal as THREE.Vector3).applyQuaternion(ring.quaternion);
+    expect(Math.abs(n.dot(earthBody))).toBeLessThan(1e-9);
   });
 });
 
