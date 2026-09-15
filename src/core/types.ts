@@ -1,7 +1,10 @@
 import * as THREE from 'three';
 
-/** Which celestial body the camera is currently focused on. */
-export type Focus = 'earth' | 'moon' | 'sun' |
+/** Which celestial body the camera is currently focused on.
+ *  `'system'` = the top-down overview of the whole solar system (the default
+ *  starting view; Sun at the origin, every planet on its orbit below). */
+export type Focus = 'system' |
+  'earth' | 'moon' | 'sun' |
   // planets (orbit order, Pluto last)
   'mercury' | 'venus' | 'mars' | 'jupiter' | 'saturn' | 'uranus' | 'neptune' | 'pluto' |
   // moons (Mars, Jupiter, Saturn, Uranus, Neptune, Pluto)

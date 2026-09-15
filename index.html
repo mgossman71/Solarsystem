@@ -32,6 +32,65 @@
     /* [hidden] must win over any display set on .ui-btn / .seg-btn etc. */
     [hidden] { display: none !important; }
     button { -webkit-user-select: none; user-select: none; }
+
+    /* ---- Planet labels (System / wide view) ----
+       A fixed overlay pinned to the canvas; each planet's 3D position is
+       projected to screen space every frame and written onto the matching
+       .planet-label. pointer-events:none keeps the layer from intercepting
+       orbit/zoom/tap — the body's delegated click handler still fires. */
+    #planet-labels {
+      position: fixed;
+      inset: 0;
+      /* Below the control panels (z-index 12): a pill that lands over the
+         Explore/Sun panel must not paint over it or steal its clicks. */
+      z-index: 11;
+      pointer-events: none;
+      overflow: hidden;
+    }
+    .planet-label {
+      position: absolute;
+      left: 0;
+      top: 0;
+      transform: translate(-50%, calc(-100% - 10px));
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 9px 3px 7px;
+      background: rgba(10, 14, 24, 0.62);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.2px;
+      color: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(8px) saturate(1.2);
+      -webkit-backdrop-filter: blur(8px) saturate(1.2);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+      white-space: nowrap;
+      user-select: none;
+      -webkit-user-select: none;
+      will-change: left, top;
+      pointer-events: auto;
+      cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+    .planet-label:hover {
+      background: rgba(18, 26, 44, 0.78);
+      border-color: rgba(143, 208, 255, 0.55);
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45), 0 0 12px rgba(143, 208, 255, 0.25);
+    }
+    .planet-label:active {
+      background: rgba(28, 40, 66, 0.85);
+      border-color: rgba(143, 208, 255, 0.85);
+    }
+    .planet-label .planet-label-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      flex: 0 0 auto;
+      background: #8fd0ff;
+      box-shadow: 0 0 6px rgba(143, 208, 255, 0.9);
+    }
     /* ---- Primary bar (desktop, bottom center) ---- */
     .primary-bar {
       position: absolute;
@@ -552,6 +611,13 @@
 <body>
   <div id="app"></div>
 
+  <!-- Planet name labels for the wide (System) overview — built/populated by
+       EarthScene.setupPlanetLabels(). The layer container is pointer-events:none
+       so orbit/zoom/tap on the canvas still works; each individual .planet-label
+       re-enables pointer-events and carries a data-focus so clicking it flies
+       to that planet (handled by the delegated body click handler). -->
+  <div id="planet-labels" role="group" aria-label="Planets"></div>
+
   <!-- Loading overlay (EarthScene adds .done and removes this element on completion) -->
   <div id="loading">
     <div class="loading-inner">
@@ -567,10 +633,11 @@
   <div class="primary-bar" id="primary-bar">
     <div class="pb-group">
       <span class="pb-label">Planets</span>
+      <button class="ui-btn active" data-focus="system" aria-pressed="true" title="Whole-system top-down overview">System</button>
       <button class="ui-btn" data-focus="sun" aria-pressed="false" title="Fly to the Sun">Sun</button>
       <button class="ui-btn" data-focus="mercury" aria-pressed="false" title="Fly to Mercury">Mercury</button>
       <button class="ui-btn" data-focus="venus" aria-pressed="false" title="Fly to Venus">Venus</button>
-      <button class="ui-btn active" data-focus="earth" aria-pressed="true">Earth</button>
+      <button class="ui-btn" data-focus="earth" aria-pressed="false" title="Fly to Earth">Earth</button>
       <button class="ui-btn" data-focus="mars" aria-pressed="false" title="Fly to Mars and its two moons">Mars</button>
       <button class="ui-btn" data-focus="jupiter" aria-pressed="false" title="Fly to Jupiter and its four Galilean moons">Jupiter</button>
       <button class="ui-btn" data-focus="saturn" aria-pressed="false" title="Fly to Saturn and its rings">Saturn</button>
@@ -583,6 +650,7 @@
       <button class="ui-btn active" data-action="auto-rotate" aria-pressed="true">Auto Rotate</button>
       <button class="ui-btn active" data-action="atmosphere" aria-pressed="true">Atmosphere</button>
       <button class="ui-btn active" data-action="clouds" aria-pressed="true">Clouds</button>
+      <button class="ui-btn active" data-action="labels" aria-pressed="true" title="Show planet name labels in the wide System view">Labels</button>
       <button class="ui-btn" data-action="reset">Reset</button>
     </div>
     <div class="pb-divider"></div>
@@ -681,9 +749,10 @@
       <section class="sheet-section">
         <h3>Planets</h3>
         <div class="seg-group sheet-seg">
+          <button class="seg-btn active" data-focus="system">System</button>
           <button class="seg-btn" data-focus="mercury">Mercury</button>
           <button class="seg-btn" data-focus="venus">Venus</button>
-          <button class="seg-btn active" data-focus="earth">Earth</button>
+          <button class="seg-btn" data-focus="earth">Earth</button>
           <button class="seg-btn" data-focus="mars">Mars</button>
           <button class="seg-btn" data-focus="jupiter">Jupiter</button>
           <button class="seg-btn" data-focus="saturn">Saturn</button>
@@ -733,6 +802,7 @@
           <button class="ui-btn active" data-action="auto-rotate">Auto Rotate</button>
           <button class="ui-btn active" data-action="atmosphere">Atmosphere</button>
           <button class="ui-btn active" data-action="clouds">Clouds</button>
+          <button class="ui-btn active" data-action="labels">Labels</button>
           <button class="ui-btn" data-action="reset">Reset</button>
           <button class="ui-btn" data-action="fullscreen">Fullscreen</button>
         </div>

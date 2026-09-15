@@ -2,10 +2,12 @@ import * as THREE from 'three';
 import { STAR_FIELD_RADIUS_MIN, STAR_FIELD_RADIUS_SPAN } from '../config/sceneScale';
 
 // Point-size scale for the star vertex shader (its `uScale` uniform). A point
-// sprite renders `aSize * (uScale / depth)` pixels, so for a fixed world size
-// uScale must grow with the depth the stars sit at — the shell radius. 600.0
-// was hand-tuned for the original 200–350 shell (mean ≈ 275); deriving it from
-// the CURRENT shell mean keeps every star the same on-screen size and
+// sprite renders `aSize * (uScale / shellRadius)` pixels — the divisor is the
+// star's OWN shell radius (see the vertex shader), so the size is independent
+// of camera position and the skybox reads as infinitely distant. For a fixed
+// world size uScale must grow with the radius the stars sit at. 600.0 was
+// hand-tuned for the original 200–350 shell (mean ≈ 275); deriving it from the
+// CURRENT shell mean keeps every star the same on-screen size and
 // self-corrects if the band moves again (rather than silently shrinking as the
 // shell was pushed out past the Saturn moons).
 const STAR_SHELL_MEAN = STAR_FIELD_RADIUS_MIN + STAR_FIELD_RADIUS_SPAN / 2;
@@ -15,14 +17,16 @@ import { starVertexShader, starFragmentShader } from './shaders/starfield';
 /**
  * Build the additive star-sprite backdrop and add it to the scene.
  *
- * Stars are placed on a shell 1000–1150 units out (STAR_FIELD_RADIUS_*) —
- * beyond the farthest body in either scale mode (Iapetus in Real scale ≈ 860
- * from the origin) — so they always sit behind every body and read as an
- * infinitely distant skybox, never between the camera and a planet (additive
- * points can't be occluded by the transparent rings, so stars in front of
- * Saturn's outer moons would otherwise show through them). `starCount` is
- * tier-driven (20k desktop / 13k balanced / 8.5k performance): the stars are
- * additive point sprites, so the count is a direct fill-rate cost.
+ * Stars are placed on a far shell (STAR_FIELD_RADIUS_*, ~12000–13000) — beyond
+ * the farthest body AND beyond the highest (top-down System) camera position,
+ * so they always sit behind every body and read as an infinitely distant
+ * skybox, never between the camera and a planet. (Additive points can't be
+ * occluded by the transparent rings, so stars in front of Saturn's outer moons
+ * would otherwise show through them; and if the shell sat INSIDE the top-down
+ * camera, the whole star sphere would render as a giant ball around the
+ * planets — see sceneScale.ts.) `starCount` is tier-driven (20k desktop / 13k
+ * balanced / 8.5k performance): the stars are additive point sprites, so the
+ * count is a direct fill-rate cost.
  */
 export function createStarField(scene: THREE.Scene, starCount: number): THREE.Points {
   const positions = new Float32Array(starCount * 3);

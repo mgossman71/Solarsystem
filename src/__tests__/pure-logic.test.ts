@@ -27,6 +27,7 @@ import {
   planetRadius,
   moonPeriod,
 } from '../planets/registry';
+import { orbitPosition } from '../planets/orbital';
 
 // ---- Vector3 ≈ [x, y, z] helper (keeps the tests readable) ----
 const expectVec = (v: THREE.Vector3, x: number, y: number, z: number): void => {
@@ -191,6 +192,58 @@ describe('planet registry', () => {
       farthestReal = Math.max(farthestReal, orbit + Math.max(outerMoon, span));
     }
     expect(STAR_FIELD_RADIUS_MIN).toBeGreaterThan(farthestReal);
+  });
+});
+
+// ------------------------------------------------------------
+// Orbital-plane math (inclination + ascending node)
+// ------------------------------------------------------------
+describe('orbitPosition', () => {
+  const out = new THREE.Vector3();
+
+  it('reduces to the legacy flat ecliptic when inclination and node are zero', () => {
+    // The pre-existing convention: (r·cos a, 0, -r·sin a) in the XZ plane.
+    const cases: Array<[number, [number, number, number]]> = [
+      [0.0, [100, 0, 0]],
+      [0.7, [100 * Math.cos(0.7), 0, -100 * Math.sin(0.7)]],
+      [Math.PI / 2, [0, 0, -100]],
+      [Math.PI, [-100, 0, 0]],
+    ];
+    for (const [a, [x, y, z]] of cases) {
+      orbitPosition(a, 100, 0, 0, out);
+      expectVec(out, x, y, z);
+    }
+  });
+
+  it('keeps the orbit a circle of the given radius for any plane', () => {
+    // A rigid rotation of a circle must preserve |p| == radius at every angle.
+    for (const a of [0, 0.4, 1.1, 2.3, 3.7, 5.9]) {
+      orbitPosition(a, 137, 0.12, 1.7, out);
+      expect(out.length()).toBeCloseTo(137, 9);
+    }
+  });
+
+  it('peaks at y = r·sin(inclination), independent of the ascending node', () => {
+    const incl = 15 * (Math.PI / 180);
+    orbitPosition(Math.PI / 2, 100, incl, 40 * (Math.PI / 180), out);
+    expect(out.y).toBeCloseTo(100 * Math.sin(incl), 9);
+    expect(out.length()).toBeCloseTo(100, 9);
+  });
+
+  it('matches the value used for the planet AND its orbit ring at the same angle', () => {
+    // Same helper drives both — assert the shared math for a couple of the
+    // real planet planes (degrees → radians, as the call sites do).
+    const d2r = (d: number): number => (d * Math.PI) / 180;
+    for (const [r, inclDeg, nodeDeg, a] of [
+      [40, 7.005, 48.331, 0.3805],   // Mercury
+      [2300, 17.16, 110.303, -0.5404], // Pluto (steepest)
+    ] as const) {
+      orbitPosition(a, r, d2r(inclDeg), d2r(nodeDeg), out);
+      expect(out.length()).toBeCloseTo(r, 8);
+      // Peak height of THIS plane is r·sin(incl), reached at a = π/2.
+      orbitPosition(Math.PI / 2, r, d2r(inclDeg), d2r(nodeDeg), out);
+      expect(out.y).toBeCloseTo(r * Math.sin(d2r(inclDeg)), 8);
+    }
   });
 });
 

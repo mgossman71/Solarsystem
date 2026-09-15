@@ -41,10 +41,14 @@ import {
   INITIAL_CAMERA_POSITION,
   INTERACTION_SETTLE_MS,
   ORIENTATION_REFRAME_MS,
+  SYSTEM_VIEW_MAX_DISTANCE,
+  SYSTEM_VIEW_MAX_FRAME,
+  SYSTEM_VIEW_MIN_DISTANCE,
 } from '../config/camera';
 import { prefersReducedMotion } from '../config/mobile';
 import { sunVertexShader, sunFragmentShader } from '../sun/shaders/sun';
 import { createStarField } from './StarField';
+import { createOrbitRings } from '../planets/OrbitRings';
 import { earthVertexShader, earthFragmentShader } from '../earth/shaders/earth';
 import { cloudVertexShader, cloudFragmentShader } from '../earth/shaders/cloud';
 import { atmosphereVertexShader, atmosphereFragmentShader } from '../earth/shaders/atmosphere';
@@ -52,7 +56,7 @@ import { moonVertexShader, moonFragmentShader } from '../moon/shaders/moon';
 import { PlanetSystem } from '../planets/PlanetSystem';
 import {
   MOON_OWNER, PLANETS, PLANET_BY_ID,
-  planetFrameRadius, planetMoonRadius, planetRadius,
+  planetFrameRadius, planetMoonRadius, planetOrbitRadius, planetRadius,
   type MoonDef, type PlanetDef,
 } from '../planets/registry';
 
@@ -83,6 +87,7 @@ export class EarthScene {
   private cloudMesh: THREE.Mesh | null = null;
   private atmosphereMesh: THREE.Mesh | null = null;
   private starField: THREE.Points | null = null;
+  private orbitRings: THREE.Group | null = null;
   private earthMaterial: THREE.ShaderMaterial | null = null;
   private cloudMaterial: THREE.ShaderMaterial | null = null;
   private sunRay: THREE.ArrowHelper | null = null;
@@ -160,7 +165,7 @@ export class EarthScene {
   private resetAnimId: number | null = null;
 
   // Respect reduced-motion users from the very first frame: no idle spin.
-  private state = { autoRotate: !prefersReducedMotion(), atmosphere: true, clouds: true, stars: true, autoSun: false, fullDaylight: false };
+  private state = { autoRotate: !prefersReducedMotion(), atmosphere: true, clouds: true, stars: true, autoSun: false, fullDaylight: false, planetLabels: true };
 
   // ------------------------------------------------------------
   // ADAPTIVE QUALITY (see Quality.ts)
@@ -184,7 +189,7 @@ export class EarthScene {
   private moonAngle = INITIAL_MOON_ANGLE;
   /** Live Moon world position (earthPos + its local orbit offset). */
   readonly moonPosition = new THREE.Vector3();
-  private focus: Focus = 'earth';
+  private focus: Focus = 'system';
   /** Focus requested before assets finished loading — applied in loadEarth. */
   private pendingFocus: Focus | null = null;
   private moonOrbit: OrbitMode = 'visualized';
@@ -207,6 +212,16 @@ export class EarthScene {
    */
   private hitProxies: { mesh: THREE.Mesh; focus: Focus }[] = [];
 
+  // ------------------------------------------------------------
+  // PLANET NAME LABELS (wide "System" overview)
+  // ------------------------------------------------------------
+  /** One DOM pill per planet in `#planet-labels` — projected to screen space
+   *  every frame in updatePlanetLabels(); removed from the DOM in dispose(). */
+  private planetLabelEls: { focus: Focus; name: string; el: HTMLElement }[] = [];
+  /** Scratch NDC vector for the per-frame label projection (no hot-path
+   *  allocations — same discipline as `this._v`). */
+  private _labelNdc = new THREE.Vector3();
+
   // Textures created in loadEarth — material.dispose() does NOT dispose them.
   private textures: THREE.Texture[] = [];
   /** Shared texture loader — planet systems lazy-load their maps through it. */
@@ -228,6 +243,18 @@ export class EarthScene {
 
   init(): void {
     this.applyURLParams();
+    // The constructor framed the initial System view for the DEFAULT
+    // ('explore') orbit span, but applyURLParams() may have switched to
+    // ?scale=real (Pluto 2300 → 3100), so re-fit the top-down camera now the
+    // final scale mode is known. Instant snap — no user interaction has
+    // happened yet, so no transition is needed (a live toggle later is
+    // handled by setScaleMode).
+    if (this.focus === 'system') {
+      this.camera.position.set(
+        0, this.systemFrameDistance(this.camera.fov, this.camera.aspect), 0,
+      );
+      this.controls.update();
+    }
     this.createSun();
     this.loadSun();
     this.createComposer();
@@ -241,6 +268,12 @@ export class EarthScene {
     });
     this.setupUI();
     this.setupSunUI();
+    this.setupPlanetLabels();
+    // Normalise the button state to the DEFAULT focus ('system') — the
+    // markup only carries static defaults and setFocus() (which would do
+    // this) has not run yet. Also hides the Earth-only buttons, which only
+    // make sense while Earth is focused.
+    this.syncFocusUI();
     this.bindSelection();
     this.createHitProxies();
     if (this.debugEnabled) this.setupDebugPanel();
@@ -285,6 +318,8 @@ export class EarthScene {
     if (params.get('atmosphere') === '0') this.state.atmosphere = false;
     if (params.get('stars') === '0') this.state.stars = false;
     if (params.get('rotate') === '0') this.state.autoRotate = false;
+    if (params.get('labels') === '0') this.state.planetLabels = false;
+    if (params.get('labels') === '1') this.state.planetLabels = true;
     const modeParam = params.get('mode');
     if (modeParam === '1' || modeParam === '2' || modeParam === '3') {
       this.pendingDebugMode = Number(modeParam);
@@ -301,16 +336,17 @@ export class EarthScene {
     }
     const focusParam = params.get('focus');
     if (
-      focusParam === 'earth' || focusParam === 'moon' || focusParam === 'sun' ||
+      focusParam === 'system' || focusParam === 'earth' || focusParam === 'moon' ||
+      focusParam === 'sun' ||
       isPlanetFocus(focusParam as Focus) || isPlanetMoonFocus(focusParam as Focus)
     ) {
       // Defer every non-default focus until its body exists: loadEarth applies
       // it through setFocus, which checks isFocusReady(). Do NOT assign
       // this.focus here — that would bypass the guard, so getFocus() would
       // report a focus that was never committed and focusCenter() could resolve
-      // it against a not-yet-built body. The default is already 'earth', so
-      // ?focus=earth is a no-op.
-      if (focusParam !== 'earth') this.pendingFocus = focusParam as Focus;
+      // it against a not-yet-built body. The default is already 'system'
+      // (top-down overview, always ready), so ?focus=system is a no-op.
+      if (focusParam !== 'system') this.pendingFocus = focusParam as Focus;
     }
     const sunParam = params.get('sun');
     if (sunParam) {
@@ -396,13 +432,15 @@ export class EarthScene {
 
   private createCamera(): THREE.PerspectiveCamera {
     // Far plane must reach the star shell (3300–3450) as seen from the
-    // OUTERMOST camera: a Pluto focus at its Real orbit (3100) sees the far
-    // side of the shell ~6550 out (see CAMERA_FAR).
-    const camera = new THREE.PerspectiveCamera(CAMERA_FOV, window.innerWidth / window.innerHeight, CAMERA_NEAR, CAMERA_FAR);
-    // INITIAL_CAMERA_POSITION is Earth-relative: Earth orbits the Sun, so the
-    // starting view is Earth's initial world position + that offset (same
-    // relative geometry as the old Earth-at-origin layout).
-    camera.position.copy(this.earthPos).add(this.initialCameraPosition);
+    // OUTERMOST camera — the top-down System overview sits above it (~6000–
+    // 10000), so the far side of the shell is up to ~13450 out (see CAMERA_FAR).
+    const aspect = window.innerWidth / window.innerHeight;
+    const camera = new THREE.PerspectiveCamera(CAMERA_FOV, aspect, CAMERA_NEAR, CAMERA_FAR);
+    // DEFAULT VIEW = the System: a straight-down overview centred on the Sun
+    // (at the origin) with every planet on its orbit below. Individual bodies
+    // are reached by fly-to (setFocus). Uses systemFrameDistance() with explicit
+    // fov/aspect because this.camera does not exist yet during construction.
+    camera.position.set(0, this.systemFrameDistance(CAMERA_FOV, aspect), 0);
     return camera;
   }
 
@@ -410,14 +448,17 @@ export class EarthScene {
     const controls = new OrbitControls(this.camera, this.renderer.domElement);
     controls.enableDamping = CONTROLS.enableDamping;
     controls.dampingFactor = CONTROLS.dampingFactor;
-    controls.minDistance = CONTROLS.minDistance;
-    controls.maxDistance = CONTROLS.maxDistance;
+    // The DEFAULT focus is the System overview — start the zoom clamps at its
+    // wide range (Earth/Moon/planet close-ups re-clamp per pose in
+    // animateCameraTo, e.g. Earth min 1.3 / max 8).
+    controls.minDistance = SYSTEM_VIEW_MIN_DISTANCE;
+    controls.maxDistance = SYSTEM_VIEW_MAX_DISTANCE;
     controls.enablePan = CONTROLS.enablePan;
     controls.rotateSpeed = CONTROLS.rotateSpeed;
     controls.zoomSpeed = CONTROLS.zoomSpeed;
-    // Earth is the default focus and it MOVES (it orbits the Sun) — start
-    // the orbit target on it, not on the scene origin.
-    controls.target.copy(this.earthPos);
+    // The Sun is the fixed system centre — start the orbit target on the
+    // origin (top-down overview), not on Earth (which orbits below it).
+    controls.target.copy(this._origin);
 
     controls.addEventListener('start', () => {
       this.isInteracting = true;
@@ -666,6 +707,10 @@ export class EarthScene {
     this.starField = createStarField(this.scene, this.quality!.starCount);
     this.starField.visible = this.state.stars;
 
+    // Faint orbit guide rings (see OrbitRings.ts) — orientation for the
+    // top-down System overview. Rebuilt on scale-mode change (radii differ).
+    this.orbitRings = createOrbitRings(this.scene, this.scaleMode);
+
     // Debug: Sun direction ray (hidden unless toggled) — drawn at the Earth
     // center along the shared apparent Sun direction (toward the Sun at the
     // origin). repositionEarth() keeps its origin on the moving Earth.
@@ -697,11 +742,14 @@ export class EarthScene {
       this.applyQualityLevers(this.quality!);
     }
 
-    // Focus requested before the Moon existed (URL param or fast UI click).
+    // Focus requested before the body existed (URL param or fast UI click).
     if (this.pendingFocus) {
       const f = this.pendingFocus;
       this.pendingFocus = null;
-      if (f !== 'earth') this.setFocus(f);
+      // 'system' is the default focus — the guard mirrors applyURLParams():
+      // applying it would be a no-op, but every OTHER value (including
+      // 'earth' — ?focus=earth!) must actually land.
+      if (f !== 'system') this.setFocus(f);
     }
 
     // Fade out hint
@@ -967,6 +1015,10 @@ export class EarthScene {
         }
         this.syncUIButtons();
         break;
+      case 'labels':
+        this.state.planetLabels = !this.state.planetLabels;
+        this.syncUIButtons();
+        break;
       case 'fullscreen': this.toggleFullscreen(); break;
     }
   };
@@ -1162,16 +1214,18 @@ export class EarthScene {
     sync('auto-rotate', this.state.autoRotate);
     sync('atmosphere', this.state.atmosphere);
     sync('clouds', this.state.clouds);
+    sync('labels', this.state.planetLabels);
   }
 
   /**
-   * Smoothly return the camera to the initial view = Earth focus. Delegates
-   * to the shared focus transition (see setFocus) so Reset and the Explore
-   * selector can never fight each other. Cancels if the user grabs the
-   * camera mid-flight (handled in createControls via resetAnimId).
+   * Smoothly return the camera to the initial view = the top-down System
+   * overview. Delegates to the shared focus transition (see setFocus) so
+   * Reset and the Explore selector can never fight each other. Cancels if
+   * the user grabs the camera mid-flight (handled in createControls via
+   * resetAnimId).
    */
   private resetView(): void {
-    this.setFocus('earth');
+    this.setFocus('system');
   }
 
   // ------------------------------------------------------------
@@ -1444,6 +1498,7 @@ export class EarthScene {
 
   /** Resolve the live world-space center of the current focus target. */
   private focusCenter(out: THREE.Vector3): THREE.Vector3 {
+    if (this.focus === 'system') return out.copy(this._origin);
     if (this.focus === 'sun') return out.copy(this.sunWorldPos);
     if (this.focus === 'moon') return out.copy(this.moonPosition);
     if (isPlanetFocus(this.focus)) {
@@ -1481,7 +1536,30 @@ export class EarthScene {
     return (Math.max(span / vTan, span / hTan)) * margin;
   }
 
+  /** Straight-down distance at which the OUTERMOST orbit (current scale
+   *  mode) fits WITHOUT CROPPING in the given fov/aspect, capped so narrow
+   *  aspects stay sane and zoomable (see SYSTEM_VIEW_MAX_FRAME). Takes
+   *  explicit fov/aspect so it can run before this.camera exists (createCamera). */
+  private systemFrameDistance(fovDeg: number, aspect: number): number {
+    let outer = EARTH_ORBIT_RADIUS;
+    for (const p of PLANETS) outer = Math.max(outer, planetOrbitRadius(p, this.scaleMode));
+    const vTan = Math.tan(THREE.MathUtils.degToRad(fovDeg / 2));
+    const hTan = vTan * aspect;
+    if (vTan <= 0 || hTan <= 0) return SYSTEM_VIEW_MAX_FRAME;
+    return Math.min(Math.max(outer / vTan, outer / hTan) * 1.1, SYSTEM_VIEW_MAX_FRAME);
+  }
+
   private computeFocusPose(focus: Focus): CameraPose {
+    if (focus === 'system') {
+      // Straight-down overview of the whole system, centred on the Sun.
+      const dist = this.systemFrameDistance(this.camera.fov, this.camera.aspect);
+      return {
+        position: new THREE.Vector3(0, dist, 0),
+        target: this._origin.clone(),
+        minDistance: SYSTEM_VIEW_MIN_DISTANCE,
+        maxDistance: SYSTEM_VIEW_MAX_DISTANCE,
+      };
+    }
     if (focus === 'earth') {
       const dir = this.initialCameraPosition.clone().normalize();
       // Keep the globe (and its 1.08 atmosphere shell) fully in frame even on
@@ -1598,7 +1676,8 @@ export class EarthScene {
     const cameraDist = this.camera.position.distanceTo(target);
     const margin = 1.08;
     let required: number; // every branch below assigns before the read
-    if (focus === 'earth') required = this.fitDistance(1.08, 0, margin);
+    if (focus === 'system') required = this.systemFrameDistance(this.camera.fov, this.camera.aspect);
+    else if (focus === 'earth') required = this.fitDistance(1.08, 0, margin);
     else if (focus === 'moon') required = this.fitDistance(MOON_RADIUS, 0, margin * 1.1);
     else if (focus === 'sun') required = this.fitDistance(SUN_RADIUS * 2.75, 0, margin * 1.05);
     else if (isPlanetFocus(focus)) {
@@ -1722,6 +1801,7 @@ export class EarthScene {
   /** True once the body behind `f` has been built (Earth/Sun exist before
    *  any UI is wired; Moon and Saturn arrive with the first-paint assets). */
   private isFocusReady(f: Focus): boolean {
+    if (f === 'system') return true;
     if (f === 'earth' || f === 'sun') return true;
     if (f === 'moon') return this.moonMesh != null;
     if (isPlanetFocus(f)) return this.planets.has(f);
@@ -1772,6 +1852,8 @@ export class EarthScene {
     this.scaleMode = mode;
     this.updateMoonTransform();
     for (const sys of this.planets.values()) sys.applyScaleMode(mode);
+    // The orbit span changed — the faint guide rings must follow the new radii.
+    this.rebuildOrbitRings();
     document.querySelectorAll('[data-scale]').forEach((el) => {
       const h = el as HTMLElement;
       h.classList.toggle('active', h.dataset.scale === mode);
@@ -1782,6 +1864,25 @@ export class EarthScene {
     if (this.focus !== 'earth' && this.isFocusReady(this.focus)) {
       this.animateCameraTo(this.computeFocusPose(this.focus));
     }
+  }
+
+  /** Swap the orbit guide rings for the new scale mode (radii differ). The ring
+   *  geometries are per-line; the material is shared across every ring, so it
+   *  is disposed once (grabbed from the first child). */
+  private rebuildOrbitRings(): void {
+    const old = this.orbitRings;
+    if (old) {
+      this.scene.remove(old);
+      for (const child of old.children) (child as THREE.Line).geometry.dispose();
+      // All rings share one material — dispose it once via the first child.
+      const mat = (old.children[0] as THREE.Line)?.material;
+      if (mat) {
+        if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
+        else mat.dispose();
+      }
+      this.orbitRings = null;
+    }
+    this.orbitRings = createOrbitRings(this.scene, this.scaleMode);
   }
 
   // ------------------------------------------------------------
@@ -1865,6 +1966,92 @@ export class EarthScene {
   private planetMoonPickRadius(def: MoonDef, planet: PlanetDef, mode: ScaleMode): number {
     const r = planetMoonRadius(def, planet, mode);
     return mode === 'real' ? Math.max(0.2, r * 2.5) : Math.max(0.8, r * 1.6);
+  }
+
+  // ------------------------------------------------------------
+  // PLANET NAME LABELS (wide "System" overview)
+  // ------------------------------------------------------------
+  /**
+   * Build one DOM pill per planet into `#planet-labels`. In the top-down
+   * System view the true-scale planets are sub-pixel dots (see OrbitRings.ts)
+   * — the labels are the only way to tell them apart, so they exist to point
+   * at those dots. Each pill is itself clickable (data-focus → setFocus) and
+   * is the PRIMARY way to select a planet from the System view: the enlarged
+   * hit proxies are only a few world units across and are well under a pixel
+   * at ~6000+ units of standoff. The rest of the layer is pointer-events:none
+   * so orbit/zoom/tap keep working on the canvas.
+   */
+  private setupPlanetLabels(): void {
+    const layer = document.getElementById('planet-labels');
+    if (!layer) return;
+    const mk = (id: Focus, name: string) => {
+      const el = document.createElement('span');
+      el.className = 'planet-label';
+      el.textContent = name;
+      el.style.display = 'none';
+      // Clickable → fly to that planet. The delegated body click handler
+      // (uiHandler) already maps any [data-focus] element to setFocus();
+      // this is the exact same path the planet buttons in the primary bar use.
+      el.dataset.focus = id;
+      el.setAttribute('role', 'button');
+      el.setAttribute('title', `Fly to ${name}`);
+      const dot = document.createElement('i');
+      dot.className = 'planet-label-dot';
+      el.prepend(dot);
+      layer.appendChild(el);
+      this.planetLabelEls.push({ focus: id, name, el });
+    };
+    // Earth is the special-case body — it is NOT in the PLANETS registry (it
+    // owns its own shader/texture path and is tracked by `this.earthPos`), so
+    // add it explicitly (it appears first in the DOM, then Mercury … Pluto).
+    mk('earth', 'Earth');
+    for (const def of PLANETS) mk(def.id, def.name);
+  }
+
+  /** Per-frame: hide every label unless we're in the wide System view with
+   *  labels enabled — then project each planet's live world position to
+   *  screen space and position its pill just above the dot. Labels behind
+   *  the camera or off the viewport are hidden (NDC z > 1 / out of range). */
+  private updatePlanetLabels(): void {
+    if (this.planetLabelEls.length === 0) return;
+    // project() reads camera.matrixWorldInverse, normally only refreshed
+    // inside renderer.render() — refresh it from the camera's current
+    // transform so the projection is exact for THIS frame.
+    this.camera.updateMatrixWorld();
+    const show = this.focus === 'system' && this.state.planetLabels;
+    const w = this.renderer.domElement.clientWidth;
+    const h = this.renderer.domElement.clientHeight;
+    for (const p of this.planetLabelEls) {
+      if (!show) {
+        if (p.el.style.display !== 'none') p.el.style.display = 'none';
+        continue;
+      }
+      // Earth is tracked by `this.earthPos` (special-case body, not in
+      // `this.planets`); every other label resolves through its PlanetSystem.
+      if (p.focus === 'earth') this._v.copy(this.earthPos);
+      else {
+        const sys = this.planets.get(p.focus);
+        if (!sys) {
+          p.el.style.display = 'none';
+          continue;
+        }
+        // The system group sits at the planet's live orbit position — the same
+        // `center()` the focus/pose code uses.
+        sys.center(this._v);
+      }
+      this._labelNdc.copy(this._v).project(this.camera);
+      if (this._labelNdc.z > 1 || this._labelNdc.z < -1
+        || this._labelNdc.x < -1.05 || this._labelNdc.x > 1.05
+        || this._labelNdc.y < -1.05 || this._labelNdc.y > 1.05) {
+        p.el.style.display = 'none';
+        continue;
+      }
+      const x = (this._labelNdc.x + 1) * 0.5 * w;
+      const y = (1 - this._labelNdc.y) * 0.5 * h;
+      p.el.style.display = '';
+      p.el.style.left = `${x}px`;
+      p.el.style.top = `${y}px`;
+    }
   }
 
   /** Keep the moving proxies in lock-step with their bodies (per frame). */
@@ -2473,6 +2660,9 @@ export class EarthScene {
     this.updateHitProxies();
 
     this.controls.update();
+    // AFTER controls.update(): projecting earlier leaves every pill a frame
+    // behind the camera (updatePlanetLabels refreshes the camera matrix).
+    this.updatePlanetLabels();
     // Composer path: the scene renders into a linear HDR target (opaque
     // shaders' tone-mapping/color-space includes are no-ops there), the Sun's
     // HDR values drive the bloom, and OutputPass applies ACES + sRGB once.
@@ -2499,6 +2689,7 @@ export class EarthScene {
 
   dispose(): void {
     this.disposed = true;
+    this.orbitRings = null; // the scene traverse below frees its Line geoms + material
     // Planet systems: stop in-flight texture loads from attaching to disposed
     // materials (their meshes/textures are freed by the shared traverse below).
     for (const sys of this.planets.values()) sys.markDisposed();
@@ -2513,6 +2704,12 @@ export class EarthScene {
       this.debugPanel.remove();
       this.debugPanel = null;
     }
+    // The planet-name label pills live in #planet-labels (outside the scene
+    // graph, so the traverse below never sees them) — remove them so none
+    // linger over a load-failure overlay, and clear the references so a
+    // re-instantiation against the same document appends one set, not two.
+    for (const p of this.planetLabelEls) p.el.remove();
+    this.planetLabelEls.length = 0;
     if (this.animationId != null) cancelAnimationFrame(this.animationId);
     this.animationId = null;
     if (this.resetAnimId != null) cancelAnimationFrame(this.resetAnimId);

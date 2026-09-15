@@ -39,16 +39,21 @@ export const MOON_ORBIT_PERIOD_VISUAL = 60; // s per orbit, "Visualized" mode
 export const MOON_ORBIT_PERIOD_REALTIME = 27.32 * 24 * 3600; // sidereal month, s
 
 // ---- Star field backdrop ----
-// The shell must sit BEHIND every body the camera looks past, in BOTH scale
-// modes — stars between the camera and a body composite over transparent
-// areas (additive points never write depth → "stars through the rings"). The
-// farthest body is Pluto in Real scale: its orbit (3100) plus Charon (0.55)
-// ≈ 3100.5 from the Sun at the origin, so the shell's inner edge clears that.
+// The shell must sit BEYOND every body the camera looks past, AND beyond the
+// highest camera position. Two reasons it is far out:
+//   1. Stars between the camera and a body composite over transparent areas
+//      (additive points never write depth → "stars through the rings"), so the
+//      shell must clear the farthest body — Pluto in Real scale, orbit 3100.
+//   2. The default top-down System camera sits at ~6000–10000 (camera.ts
+//      SYSTEM_VIEW_*). If the shell were inside that (the old 3300–3450), the
+//      camera would be OUTSIDE it and the star sphere would render as a giant
+//      ball enclosing the planets. At 12000 the camera stays inside and the
+//      stars read as an infinitely distant skybox behind every body.
 // (Per-star pixel size tracks the shell depth via StarField's `uScale`, and
 // star COUNT is radius-independent for a centred camera — so neither needs
 // changing when the band moves.)
-export const STAR_FIELD_RADIUS_MIN = 3300;
-export const STAR_FIELD_RADIUS_SPAN = 150; // radius = MIN + rand() * SPAN (3300–3450)
+export const STAR_FIELD_RADIUS_MIN = 12000;
+export const STAR_FIELD_RADIUS_SPAN = 1000; // radius = MIN + rand() * SPAN (12000–13000)
 
 /** Wrap an azimuth in degrees into the -180..180 range. */
 export function wrapAzimuth(deg: number): number {
