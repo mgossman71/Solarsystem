@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { RoamController, type RoamCollider } from './RoamController';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
@@ -37,7 +37,6 @@ import {
   CAMERA_FAR,
   CAMERA_FOV,
   CAMERA_NEAR,
-  CONTROLS,
   INITIAL_CAMERA_POSITION,
   INTERACTION_SETTLE_MS,
   ORIENTATION_REFRAME_MS,
@@ -81,7 +80,7 @@ export class EarthScene {
   private bloomPass: UnrealBloomPass | null = null;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
-  private controls: OrbitControls;
+  private roam: RoamController;
 
   private earthMesh: THREE.Mesh | null = null;
   private cloudMesh: THREE.Mesh | null = null;
@@ -247,7 +246,7 @@ export class EarthScene {
     this.renderer = this.createRenderer();
     this.scene = new THREE.Scene();
     this.camera = this.createCamera();
-    this.controls = this.createControls();
+    this.roam = this.createRoam();
   }
 
   init(): void {
@@ -262,7 +261,8 @@ export class EarthScene {
       this.camera.position.set(
         0, this.systemFrameDistance(this.camera.fov, this.camera.aspect), 0,
       );
-      this.controls.update();
+      this.camera.lookAt(this._origin);
+      this.roam.syncFromCamera();
     }
     this.createSun();
     this.loadSun();
@@ -413,8 +413,8 @@ export class EarthScene {
     renderer.setClearColor(0x000000, 1);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.1;
-    // OrbitControls already sets touch-action:none on the canvas, so one-finger
-    // orbit and two-finger pinch own the gestures here and the page never
+    // RoamController already sets touch-action:none on the canvas, so one-finger
+    // look and two-finger pinch own the gestures here and the page never
     // scrolls/zooms under them — while UI panels keep normal touch behavior.
     renderer.domElement.style.touchAction = 'none';
     renderer.domElement.style.width = '100%';
@@ -462,39 +462,49 @@ export class EarthScene {
     return camera;
   }
 
-  private createControls(): OrbitControls {
-    const controls = new OrbitControls(this.camera, this.renderer.domElement);
-    controls.enableDamping = CONTROLS.enableDamping;
-    controls.dampingFactor = CONTROLS.dampingFactor;
-    // The DEFAULT focus is the System overview — start the zoom clamps at its
-    // wide range (Earth/Moon/planet close-ups re-clamp per pose in
-    // animateCameraTo, e.g. Earth min 1.3 / max 8).
-    controls.minDistance = SYSTEM_VIEW_MIN_DISTANCE;
-    controls.maxDistance = SYSTEM_VIEW_MAX_DISTANCE;
-    controls.enablePan = CONTROLS.enablePan;
-    controls.rotateSpeed = CONTROLS.rotateSpeed;
-    controls.zoomSpeed = CONTROLS.zoomSpeed;
-    // The Sun is the fixed system centre — start the orbit target on the
-    // origin (top-down overview), not on Earth (which orbits below it).
-    controls.target.copy(this._origin);
+  private createRoam(): RoamController {
+    // The Sun is the fixed system centre — start looking at the origin
+    // (top-down overview), not at Earth (which orbits around it).
+    this.camera.lookAt(this._origin);
+    const roam = new RoamController(this.camera, this.renderer.domElement);
+    roam.syncFromCamera();
 
-    controls.addEventListener('start', () => {
+    roam.addEventListener('start', () => {
       this.isInteracting = true;
-      // User grabbed the camera: bail on any in-flight reset transition so it
-      // cannot fight the user's drag.
+      // User grabbed the camera: bail on any in-flight fly-to so it can't
+      // fight the drag, and hand the camera back to free-roam.
       if (this.resetAnimId != null) {
         cancelAnimationFrame(this.resetAnimId);
         this.resetAnimId = null;
       }
+      this.roam.endFly();
       if (this.interactionTimeout) clearTimeout(this.interactionTimeout);
     });
 
-    controls.addEventListener('end', () => {
+    roam.addEventListener('end', () => {
       if (this.interactionTimeout) clearTimeout(this.interactionTimeout);
       this.interactionTimeout = setTimeout(() => { this.isInteracting = false; }, INTERACTION_SETTLE_MS);
     });
 
-    return controls;
+    return roam;
+  }
+
+  /** Build the live soft-collider list (Sun/Earth/Moon + every planet and its
+   *  moons). `position` entries are shared references into the scene, so they
+   *  track their bodies every frame; radii are the current rendered sizes, so
+   *  this is re-run whenever the scale mode changes. */
+  private buildRoamColliders(): RoamCollider[] {
+    const list: RoamCollider[] = [];
+    list.push({ position: this.sunWorldPos, radius: SUN_RADIUS });
+    list.push({ position: this.earthPos, radius: 1 });
+    list.push({ position: this.moonPosition, radius: MOON_RADIUS });
+    for (const sys of this.planets.values()) {
+      list.push({ position: sys.position, radius: planetRadius(sys.def) });
+      for (let i = 0; i < sys.def.moons.length; i++) {
+        list.push({ position: sys.moonWorlds[i], radius: sys.moonRadii[i] });
+      }
+    }
+    return list;
   }
 
   // ------------------------------------------------------------
@@ -721,6 +731,11 @@ export class EarthScene {
       if (def.eager) void sys.load(loader);
     }
 
+    // Free-roam soft colliders — one per body. Positions are live references
+    // (tracked every frame); radii are the current rendered sizes, so this is
+    // re-run on scale-mode change (see setScaleMode).
+    this.roam.colliders = this.buildRoamColliders();
+
     // Star background
     this.starField = createStarField(this.scene, this.quality!.starCount);
     this.starField.visible = this.state.stars;
@@ -879,11 +894,11 @@ export class EarthScene {
    *
    *   earthPos = -EARTH_ORBIT_RADIUS * sun.direction
    *
-   * When the focused body (Earth or Moon) moves with it, the camera AND the
-   * controls target are shifted by the same delta, so the view keeps its
-   * exact offset — "moving the Sun" never jolts the frame. Idempotent: in
-   * manual mode it just re-syncs positions, which is what animate() relies
-   * on (e.g. the first frames after loadEarth() created the meshes).
+   * In free-roam the camera is NOT glued to the body — if a Sun sweep moves
+   * the system, the user's camera simply stays put (that's the whole point of
+   * an unbound camera). This method only re-syncs the Earth/Moon meshes to
+   * the live orbit point. Idempotent: in manual mode it just re-syncs
+   * positions, which is what animate() relies on (first frames after load).
    */
   private repositionEarth(): void {
     const newE = this._earthTmp.copy(this.sun.direction).multiplyScalar(-EARTH_ORBIT_RADIUS);
@@ -891,14 +906,6 @@ export class EarthScene {
     const dy = newE.y - this.earthPos.y;
     const dz = newE.z - this.earthPos.z;
     if (dx !== 0 || dy !== 0 || dz !== 0) {
-      if (this.focus === 'earth' || this.focus === 'moon') {
-        this.camera.position.x += dx;
-        this.camera.position.y += dy;
-        this.camera.position.z += dz;
-        this.controls.target.x += dx;
-        this.controls.target.y += dy;
-        this.controls.target.z += dz;
-      }
       this.earthPos.copy(newE);
     }
     // Position sync (idempotent — also covers the first calls after the
@@ -1097,11 +1104,11 @@ export class EarthScene {
    */
   private setupInteractionDim(): void {
     let restoreTimer: number | null = null;
-    this.controls.addEventListener('start', () => {
+    this.roam.addEventListener('start', () => {
       if (restoreTimer != null) { clearTimeout(restoreTimer); restoreTimer = null; }
       document.body.classList.add('interacting');
     });
-    this.controls.addEventListener('end', () => {
+    this.roam.addEventListener('end', () => {
       if (restoreTimer != null) clearTimeout(restoreTimer);
       restoreTimer = window.setTimeout(() => {
         restoreTimer = null;
@@ -1597,7 +1604,7 @@ export class EarthScene {
       // Keep the globe (and its 1.08 atmosphere shell) fully in frame even on
       // narrow portrait screens; 3.2 is just the desktop minimum, never a
       // ceiling on how far we may pull back. The pose is RELATIVE TO EARTH'S
-      // LIVE POSITION — the per-frame target glue (animate) keeps tracking it.
+      // LIVE POSITION — the fly-to (animateCameraTo) chases it while in flight.
       const dist = Math.max(
         this.initialCameraPosition.length(),
         this.fitDistance(1.08, 0, 1.06),
@@ -1740,22 +1747,13 @@ export class EarthScene {
     if (this.resetAnimId != null) cancelAnimationFrame(this.resetAnimId);
     if (prefersReducedMotion()) durationMs = 0;
     const startPos = this.camera.position.clone();
-    const startTarget = this.controls.target.clone();
-    const startMin = this.controls.minDistance;
-    const startMax = this.controls.maxDistance;
-    // Animate the zoom clamps alongside the camera. Applying the pose's
-    // destination clamps on frame 1 would make controls.update() snap the
-    // camera into range and kill the fly-through (the Sun pose is ~100×
-    // farther than the Earth pose), so lerp them with the same eased t.
-    const applyClamps = (ease: number): void => {
-      this.controls.minDistance = startMin + (pose.minDistance - startMin) * ease;
-      this.controls.maxDistance = startMax + (pose.maxDistance - startMax) * ease;
-    };
+    // Free-roam has no pivot: the fly drives the camera directly (position +
+    // lookAt). beginFly() suspends user input so it can't fight the transition.
+    this.roam.beginFly();
     if (durationMs <= 0) {
       this.camera.position.copy(pose.position);
-      this.controls.target.copy(pose.target);
-      applyClamps(1);
-      this.controls.update();
+      this.camera.lookAt(this.focusCenter(this._v));
+      this.roam.endFly();
       this.resetAnimId = null;
       return;
     }
@@ -1764,11 +1762,14 @@ export class EarthScene {
       const t = Math.min((now - t0) / durationMs, 1);
       const ease = t * t * (3 - 2 * t);
       this.camera.position.lerpVectors(startPos, pose.position, ease);
-      this.focusCenter(this._v); // live end-target (Moon moves while we fly)
-      this.controls.target.lerpVectors(startTarget, this._v, ease);
-      applyClamps(ease);
-      this.controls.update();
-      this.resetAnimId = t < 1 ? requestAnimationFrame(step) : null;
+      // Live end-target: the body (Moon / planet) may move while we fly.
+      this.camera.lookAt(this.focusCenter(this._v));
+      if (t < 1) {
+        this.resetAnimId = requestAnimationFrame(step);
+      } else {
+        this.resetAnimId = null;
+        this.roam.endFly();
+      }
     };
     this.resetAnimId = requestAnimationFrame(step);
   }
@@ -1842,10 +1843,10 @@ export class EarthScene {
   }
 
   /**
-   * Switch focus (Earth / Moon / Sun / planets / moons): reframe the camera with a
-   * cinematic transition and re-point OrbitControls at the new target.
-   * While focused on a moving body, animate() keeps the controls target
-   * glued to it every frame.
+   * Switch focus (Earth / Moon / Sun / planets / moons): fly the free-roam
+   * camera to the new body with a cinematic transition. While focused on a
+   * moving body, the transition keeps chasing its live position (focusCenter)
+   * every frame.
    *
    * The focus is only COMMITTED once its body exists: while it's still
    * loading, the request waits in pendingFocus (applied by loadEarth), so
@@ -1884,6 +1885,8 @@ export class EarthScene {
     this.scaleMode = mode;
     this.updateMoonTransform();
     for (const sys of this.planets.values()) sys.applyScaleMode(mode);
+    // Radii changed — refresh the free-roam soft colliders to the new sizes.
+    this.roam.colliders = this.buildRoamColliders();
     // The orbit span changed — the faint guide rings must follow the new radii.
     this.rebuildOrbitRings();
     document.querySelectorAll('[data-scale]').forEach((el) => {
@@ -2200,31 +2203,25 @@ export class EarthScene {
         p.mesh.visible = this.moonMesh != null;
         if (this.moonMesh) p.mesh.position.copy(this.moonPosition);
       } else if (isPlanetFocus(p.focus)) {
-        // Planet proxies are only useful when we're actually there (the
-        // planet itself, or one of its moons).
+        // Every planet is a click-to-zoom target at any zoom — free-roam
+        // selection is global, so track + enable all of them every frame.
         const sys = this.planets.get(p.focus);
         if (!sys) { p.mesh.visible = false; continue; }
-        const here = this.focus === p.focus
-          || (isPlanetMoonFocus(this.focus) && MOON_OWNER[this.focus] === p.focus);
-        p.mesh.visible = here;
-        if (here) sys.center(p.mesh.position);
+        p.mesh.visible = true;
+        sys.center(p.mesh.position);
       } else if (isPlanetMoonFocus(p.focus)) {
         const owner = MOON_OWNER[p.focus];
         const sys = this.planets.get(owner);
         if (!sys) { p.mesh.visible = false; continue; }
-        const here = this.focus === owner
-          || (isPlanetMoonFocus(this.focus) && MOON_OWNER[this.focus] === owner);
-        if (here) {
-          const pdef = PLANET_BY_ID[owner];
-          const mdef = pdef.moons.find((m) => m.id === p.focus);
-          // Scale-aware pick radius: the unit sphere is scaled to the active
-          // scale mode's tappable size (see planetMoonPickRadius).
-          const pick = mdef ? this.planetMoonPickRadius(mdef, pdef, this.scaleMode) : 0.8;
-          if (p.mesh.scale.x !== pick) p.mesh.scale.setScalar(pick);
-          const mw = sys.moonWorld(p.focus, this._v);
-          if (mw) p.mesh.position.copy(mw);
-        }
-        p.mesh.visible = here;
+        const pdef = PLANET_BY_ID[owner];
+        const mdef = pdef.moons.find((m) => m.id === p.focus);
+        // Scale-aware pick radius: the unit sphere is scaled to the active
+        // scale mode's tappable size (see planetMoonPickRadius).
+        const pick = mdef ? this.planetMoonPickRadius(mdef, pdef, this.scaleMode) : 0.8;
+        if (p.mesh.scale.x !== pick) p.mesh.scale.setScalar(pick);
+        const mw = sys.moonWorld(p.focus, this._v);
+        if (mw) p.mesh.position.copy(mw);
+        p.mesh.visible = true;
       }
     }
   }
@@ -2763,14 +2760,9 @@ export class EarthScene {
     if (this.moonMesh) {
       this.updateMoonTransform();
     }
-    // Keep the orbit pivot glued to the focused body while it moves — Earth
-    // orbits the Sun, the Moon orbits Earth, planets advance their orbits.
-    // repositionEarth() already shifted the target by Earth's per-frame delta;
-    // this re-glues after the Moon/planet steps and any focus change. Camera
-    // transitions drive the target themselves, so they take priority.
-    if (this.resetAnimId == null) {
-      this.controls.target.copy(this.focusCenter(this._v));
-    }
+    // Free-roam: the camera is unbound — nothing to keep glued to the focused
+    // body. roam.update() below still takes focusCenter() so dolly and travel
+    // scale with the distance to whatever body we're currently looking at.
     // Planets: advance each spin + moon orbit (same orbit/scale modes as the
     // Earth Moon), shared point-source Sun lighting.
     for (const sys of this.planets.values()) {
@@ -2803,8 +2795,8 @@ export class EarthScene {
     }
     this.updateHitProxies();
 
-    this.controls.update();
-    // AFTER controls.update(): projecting earlier leaves every pill a frame
+    this.roam.update(dt, this.focusCenter(this._v));
+    // AFTER roam.update(): projecting earlier leaves every pill a frame
     // behind the camera (updatePlanetLabels refreshes the camera matrix).
     this.updatePlanetLabels();
     // Composer path: the scene renders into a linear HDR target (opaque
@@ -2886,7 +2878,7 @@ export class EarthScene {
     }
     // (Composer passes/targets are freed via disposeComposer() — see above.)
     this.disposeComposer();
-    this.controls.dispose();
+    this.roam.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }
