@@ -41,6 +41,7 @@ import {
   INTERACTION_SETTLE_MS,
   ORIENTATION_REFRAME_MS,
   SYSTEM_VIEW_MAX_FRAME,
+  systemViewDirection,
 } from '../config/camera';
 import { prefersReducedMotion } from '../config/mobile';
 import { sunVertexShader, sunFragmentShader } from '../sun/shaders/sun';
@@ -271,14 +272,14 @@ export class EarthScene {
     this.applyURLParams();
     // The constructor framed the initial System view for the DEFAULT
     // ('explore') orbit span, but applyURLParams() may have switched to
-    // ?scale=real (Pluto 2300 → 3100), so re-fit the top-down camera now the
+    // ?scale=real (Pluto 2300 → 3100), so re-fit the tilted System camera now the
     // final scale mode is known. Instant snap — no user interaction has
     // happened yet, so no transition is needed (a live toggle later is
     // handled by setScaleMode).
     if (this.focus === 'system') {
-      this.camera.position.set(
-        0, this.systemFrameDistance(this.camera.fov, this.camera.aspect), 0,
-      );
+      this.camera.position
+        .copy(systemViewDirection())
+        .multiplyScalar(this.systemFrameDistance(this.camera.fov, this.camera.aspect));
       this.camera.lookAt(this._origin);
       this.roam.syncFromCamera();
     }
@@ -381,7 +382,7 @@ export class EarthScene {
       // this.focus here — that would bypass the guard, so getFocus() would
       // report a focus that was never committed and focusCenter() could resolve
       // it against a not-yet-built body. The default is already 'system'
-      // (top-down overview, always ready), so ?focus=system is a no-op.
+      // (the 45°-tilted overview, always ready), so ?focus=system is a no-op.
       if (focusParam !== 'system') this.pendingFocus = focusParam as Focus;
     }
     const sunParam = params.get('sun');
@@ -468,22 +469,25 @@ export class EarthScene {
 
   private createCamera(): THREE.PerspectiveCamera {
     // Far plane must clear the far side of the star shell (12000–13000, see
-    // sceneScale STAR_FIELD_RADIUS_*) from the OUTERMOST camera — the top-down
+    // sceneScale STAR_FIELD_RADIUS_*) from the OUTERMOST camera — the tilted
     // System overview can sit out to SYSTEM_VIEW_MAX_FRAME (~8000), so the far
     // shell edge is up to ~21000 from it; CAMERA_FAR (25000) clears that.
     const aspect = window.innerWidth / window.innerHeight;
     const camera = new THREE.PerspectiveCamera(CAMERA_FOV, aspect, CAMERA_NEAR, CAMERA_FAR);
-    // DEFAULT VIEW = the System: a straight-down overview centred on the Sun
-    // (at the origin) with every planet on its orbit below. Individual bodies
-    // are reached by fly-to (setFocus). Uses systemFrameDistance() with explicit
-    // fov/aspect because this.camera does not exist yet during construction.
-    camera.position.set(0, this.systemFrameDistance(CAMERA_FOV, aspect), 0);
+    // DEFAULT VIEW = the System: a 45°-elevated, side-offset (3/4) overview
+    // centred on the Sun (at the origin) with every planet on its orbit.
+    // Individual bodies are reached by fly-to (setFocus). Uses
+    // systemFrameDistance() with explicit fov/aspect because this.camera does
+    // not exist yet during construction.
+    camera.position
+      .copy(systemViewDirection())
+      .multiplyScalar(this.systemFrameDistance(CAMERA_FOV, aspect));
     return camera;
   }
 
   private createRoam(): RoamController {
     // The Sun is the fixed system centre — start looking at the origin
-    // (top-down overview), not at Earth (which orbits around it).
+    // (the 45°-tilted System overview), not at Earth (which orbits around it).
     this.camera.lookAt(this._origin);
     const roam = new RoamController(this.camera, this.renderer.domElement);
     roam.syncFromCamera();
@@ -763,7 +767,7 @@ export class EarthScene {
     this.starField.visible = this.state.stars;
 
     // Faint orbit guide rings (see OrbitRings.ts) — orientation for the
-    // top-down System overview. Rebuilt on scale-mode change (radii differ).
+    // tilted System overview. Rebuilt on scale-mode change (radii differ).
     // earthPos pre-orients the group so Earth's ring already passes through
     // Earth on frame 1; frame() re-applies the alignment every frame.
     this.orbitRings = createOrbitRings(this.scene, this.scaleMode, this.state.ringBrightness, this.earthPos);
@@ -1279,10 +1283,10 @@ export class EarthScene {
   }
 
   /**
-   * Smoothly return the camera to the initial view = the top-down System
-   * overview. Delegates to the shared focus transition (see setFocus) so
-   * Reset and the Explore selector can never fight each other. Cancels if
-   * the user grabs the camera mid-flight (resetAnimId).
+   * Smoothly return the camera to the initial view = the 45°-tilted,
+   * side-offset System overview. Delegates to the shared focus transition
+   * (see setFocus) so Reset and the Explore selector can never fight each
+   * other. Cancels if the user grabs the camera mid-flight (resetAnimId).
    */
   private resetView(): void {
     this.setFocus('system');
@@ -1596,10 +1600,15 @@ export class EarthScene {
     return (Math.max(span / vTan, span / hTan)) * margin;
   }
 
-  /** Straight-down distance at which the OUTERMOST orbit (current scale
-   *  mode) fits WITHOUT CROPPING in the given fov/aspect, capped so narrow
-   *  aspects stay sane and zoomable (see SYSTEM_VIEW_MAX_FRAME). Takes
-   *  explicit fov/aspect so it can run before this.camera exists (createCamera). */
+  /** Distance at which the OUTERMOST orbit (current scale mode) fits WITHOUT
+   *  CROPPING in the given fov/aspect, capped so narrow aspects stay sane and
+   *  zoomable (see SYSTEM_VIEW_MAX_FRAME). Takes explicit fov/aspect so it can
+   *  run before this.camera exists (createCamera).
+   *
+   *  Also the correct fit distance for the TILTED System view: with elevation
+   *  α the circle's vertical screen span shrinks to r·sinα (so the vertical
+   *  bound loosens to D ≥ r·1.1·sinα/(vTan−cosα) < r·1.1/vTan) and its side
+   *  span stays r — both remain satisfied at this (larger, safe) distance. */
   private systemFrameDistance(fovDeg: number, aspect: number): number {
     let outer = EARTH_ORBIT_RADIUS;
     for (const p of PLANETS) outer = Math.max(outer, planetOrbitRadius(p, this.scaleMode));
@@ -1609,14 +1618,25 @@ export class EarthScene {
     return Math.min(Math.max(outer / vTan, outer / hTan) * 1.1, SYSTEM_VIEW_MAX_FRAME);
   }
 
+  /**
+   * Default System-view pose — the 45°-elevated, side-offset (3/4) overview
+   * centred on the Sun (the origin). This is the single source of truth for
+   * what Reset / the System button fly back to and the re-fit after a
+   * scale-mode change, so they never disagree.
+   */
+  private systemViewPose(): CameraPose {
+    return {
+      position: systemViewDirection()
+        .multiplyScalar(this.systemFrameDistance(this.camera.fov, this.camera.aspect)),
+      target: this._origin.clone(),
+    };
+  }
+
   private computeFocusPose(focus: Focus): CameraPose {
     if (focus === 'system') {
-      // Straight-down overview of the whole system, centred on the Sun.
-      const dist = this.systemFrameDistance(this.camera.fov, this.camera.aspect);
-      return {
-        position: new THREE.Vector3(0, dist, 0),
-        target: this._origin.clone(),
-      };
+      // 45°-elevated, side-offset overview of the whole system, centred on
+      // the Sun (see systemViewPose — the shared default/Reset framing).
+      return this.systemViewPose();
     }
     if (focus === 'earth') {
       const dir = this.initialCameraPosition.clone().normalize();
@@ -2058,7 +2078,7 @@ export class EarthScene {
   // PLANET NAME LABELS (wide "System" overview)
   // ------------------------------------------------------------
   /**
-   * Build one DOM pill per planet into `#planet-labels`. In the top-down
+   * Build one DOM pill per planet into `#planet-labels`. In the tilted
    * System view the true-scale planets are sub-pixel dots (see OrbitRings.ts)
    * — the labels are the only way to tell them apart, so they exist to point
    * at those dots. Each pill is itself clickable (data-focus → setFocus) and

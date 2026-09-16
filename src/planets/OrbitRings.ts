@@ -10,8 +10,9 @@ import type { ScaleMode } from '../core/types';
  * orbital plane (inclination + ascending node from the registry,
  * PlanetSystem.reposition), built with the same orbitPosition() helper the
  * planet position uses. Earth's ring is the flat ecliptic reference circle at
- * EARTH_ORBIT_RADIUS. Their purpose is orientation in the top-down "System"
- * overview, where the true-scale planets are sub-pixel dots: the rings carry
+ * EARTH_ORBIT_RADIUS. Their purpose is orientation in the "System"
+ * overview (45°-tilted, side-offset), where the true-scale planets are
+ * sub-pixel dots: the rings carry
  * the "planets in their respective orbits" structure while the bodies stay small.
  *
  * Deliberately very low opacity and non-additive so they read as subtle guides

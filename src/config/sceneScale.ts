@@ -44,11 +44,12 @@ export const MOON_ORBIT_PERIOD_REALTIME = 27.32 * 24 * 3600; // sidereal month, 
 //   1. Stars between the camera and a body composite over transparent areas
 //      (additive points never write depth → "stars through the rings"), so the
 //      shell must clear the farthest body — Pluto in Real scale, orbit 3100.
-//   2. The default top-down System camera sits at ~6000–10000 (camera.ts
-//      SYSTEM_VIEW_*). If the shell were inside that (the old 3300–3450), the
-//      camera would be OUTSIDE it and the star sphere would render as a giant
-//      ball enclosing the planets. At 12000 the camera stays inside and the
-//      stars read as an infinitely distant skybox behind every body.
+//   2. The default (45°-tilted) System camera sits at ~5000–8000 (camera.ts
+//      SYSTEM_VIEW_*, max SYSTEM_VIEW_MAX_FRAME). If the shell were inside that
+//      (the old 3300–3450), the camera would be OUTSIDE it and the star sphere
+//      would render as a giant ball enclosing the planets. At 12000 the camera
+//      stays inside and the stars read as an infinitely distant skybox behind
+//      every body.
 // (Per-star pixel size tracks the shell depth via StarField's `uScale`, and
 // star COUNT is radius-independent for a centred camera — so neither needs
 // changing when the band moves.)

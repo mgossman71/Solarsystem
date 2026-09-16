@@ -11,7 +11,7 @@ export const starVertexShader = /* glsl */ `
     // Points object has an identity model matrix), not by camera depth:
     // uScale is calibrated to the shell mean, so every star keeps its
     // intended pixel size wherever the camera sits (camera-depth sizing
-    // bloated near-side stars 2–6× in the top-down System view).
+    // bloated near-side stars 2–6× in the tilted System overview).
     gl_PointSize = aSize * (uScale / max(0.0001, length(position)));
     gl_Position = projectionMatrix * mvPosition;
   }

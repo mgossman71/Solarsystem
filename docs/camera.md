@@ -4,10 +4,13 @@ Camera + free-roam controls + focus/framing + scale/orbit modes. Defaults live i
 `src/config/camera.ts`; scene geometry in `src/config/sceneScale.ts`.
 
 ## Static setup
-- **Camera**: `PerspectiveCamera(45°, …, near 0.01, far 25000)`; starts top-down
-  over the System (the Sun is the fixed centre at the origin; Earth orbits it at
-  `EARTH_ORBIT_RADIUS = 600`). The far plane clears the star shell (12000–13000)
-  from the outermost camera (see `CAMERA_FAR`).
+- **Camera**: `PerspectiveCamera(45°, …, near 0.01, far 25000)`; starts on the
+  System overview — a 45°-elevated, side-offset (3/4) framing centred on the Sun
+  (the fixed centre at the origin; Earth orbits it at `EARTH_ORBIT_RADIUS = 600`),
+  with the elevation/azimuth in `SYSTEM_VIEW_ELEVATION_DEG` /
+  `SYSTEM_VIEW_AZIMUTH_DEG` and the fit distance in `systemFrameDistance()`
+  (`EarthScene`). The far plane clears the star shell (12000–13000) from the
+  outermost camera (see `CAMERA_FAR`).
 - **Free-roam controls** (`RoamController`, replaces `OrbitControls`): no orbit
   pivot — the camera is a free point you drive. Desktop: drag = look, wheel /
   vertical trackpad = dolly, horizontal trackpad = yaw, **WASD/QE** = fly, **Shift**

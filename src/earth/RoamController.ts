@@ -335,9 +335,9 @@ export class RoamController extends THREE.EventDispatcher<RoamControllerEvents> 
       }
 
       // 4) COMMIT orientation — only when look input changed it, so a frame
-      //    without look input (e.g. right after a top-down System fly-to)
-      //    can't rewrite the pose past maxPitch and tilt it away from a true
-      //    straight-down view.
+      //    without look input (e.g. right after a tilted System fly-to)
+      //    can't rewrite the pose past maxPitch and tilt it away from the
+      //    intended framing.
       if (hasLook) this.applyOrientation();
 
       // 7) RESET accumulators (only meaningful on an input frame).
