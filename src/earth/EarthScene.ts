@@ -40,9 +40,7 @@ import {
   INITIAL_CAMERA_POSITION,
   INTERACTION_SETTLE_MS,
   ORIENTATION_REFRAME_MS,
-  SYSTEM_VIEW_MAX_DISTANCE,
   SYSTEM_VIEW_MAX_FRAME,
-  SYSTEM_VIEW_MIN_DISTANCE,
 } from '../config/camera';
 import { prefersReducedMotion } from '../config/mobile';
 import { sunVertexShader, sunFragmentShader } from '../sun/shaders/sun';
@@ -449,9 +447,10 @@ export class EarthScene {
   };
 
   private createCamera(): THREE.PerspectiveCamera {
-    // Far plane must reach the star shell (3300–3450) as seen from the
-    // OUTERMOST camera — the top-down System overview sits above it (~6000–
-    // 10000), so the far side of the shell is up to ~13450 out (see CAMERA_FAR).
+    // Far plane must clear the far side of the star shell (12000–13000, see
+    // sceneScale STAR_FIELD_RADIUS_*) from the OUTERMOST camera — the top-down
+    // System overview can sit out to SYSTEM_VIEW_MAX_FRAME (~8000), so the far
+    // shell edge is up to ~21000 from it; CAMERA_FAR (25000) clears that.
     const aspect = window.innerWidth / window.innerHeight;
     const camera = new THREE.PerspectiveCamera(CAMERA_FOV, aspect, CAMERA_NEAR, CAMERA_FAR);
     // DEFAULT VIEW = the System: a straight-down overview centred on the Sun
@@ -495,8 +494,11 @@ export class EarthScene {
    *  this is re-run whenever the scale mode changes. */
   private buildRoamColliders(): RoamCollider[] {
     const list: RoamCollider[] = [];
-    list.push({ position: this.sunWorldPos, radius: SUN_RADIUS });
-    list.push({ position: this.earthPos, radius: 1 });
+    // Sun: clear the CORONA halo (SUN_RADIUS*2.75), not just the photosphere —
+    // the Sun pose sits above it, but free-roam must not dive through the halo.
+    list.push({ position: this.sunWorldPos, radius: SUN_RADIUS * 2.75 });
+    // Earth: clear the atmosphere shell (1.08), not just the globe surface (1).
+    list.push({ position: this.earthPos, radius: 1.08 });
     list.push({ position: this.moonPosition, radius: MOON_RADIUS });
     for (const sys of this.planets.values()) {
       list.push({ position: sys.position, radius: planetRadius(sys.def) });
@@ -1260,8 +1262,7 @@ export class EarthScene {
    * Smoothly return the camera to the initial view = the top-down System
    * overview. Delegates to the shared focus transition (see setFocus) so
    * Reset and the Explore selector can never fight each other. Cancels if
-   * the user grabs the camera mid-flight (handled in createControls via
-   * resetAnimId).
+   * the user grabs the camera mid-flight (resetAnimId).
    */
   private resetView(): void {
     this.setFocus('system');
@@ -1595,8 +1596,6 @@ export class EarthScene {
       return {
         position: new THREE.Vector3(0, dist, 0),
         target: this._origin.clone(),
-        minDistance: SYSTEM_VIEW_MIN_DISTANCE,
-        maxDistance: SYSTEM_VIEW_MAX_DISTANCE,
       };
     }
     if (focus === 'earth') {
@@ -1612,8 +1611,6 @@ export class EarthScene {
       return {
         position: this.earthPos.clone().addScaledVector(dir, dist),
         target: this.earthPos.clone(),
-        minDistance: 1.3,
-        maxDistance: 8,
       };
     }
     if (focus === 'moon') {
@@ -1627,9 +1624,6 @@ export class EarthScene {
       return {
         position: target.clone().addScaledVector(dir, dist),
         target,
-        // Stay above the surface with room for the map to resolve.
-        minDistance: MOON_RADIUS * 1.6,
-        maxDistance: 6,
       };
     }
     if (focus === 'sun') {
@@ -1643,8 +1637,6 @@ export class EarthScene {
       return {
         position: target.clone().addScaledVector(dir, dist),
         target,
-        minDistance: SUN_RADIUS * 2.2, // never clip inside the photosphere
-        maxDistance: EARTH_ORBIT_RADIUS * 1.2, // pull back until Earth fits too
       };
     }
     if (isPlanetFocus(focus)) {
@@ -1667,8 +1659,6 @@ export class EarthScene {
       return {
         position: target.clone().addScaledVector(dir, dist),
         target,
-        minDistance: planetRadius(sys.def) * 1.35, // just above the oblate equator
-        maxDistance: dist * 3,
       };
     }
     if (isPlanetMoonFocus(focus)) {
@@ -1689,8 +1679,6 @@ export class EarthScene {
         return {
           position: target.clone().addScaledVector(dir, dist),
           target,
-          minDistance: r * 1.3,
-          maxDistance: dist * 4,
         };
       }
     }
@@ -1737,11 +1725,9 @@ export class EarthScene {
   /**
    * Animate the camera to a pose. Wall-clock driven (frame-rate independent),
    * single stored handle so rapid re-selection cannot stack competing
-   * chains; a user grab cancels it (createControls, resetAnimId). The END
-   * target is re-resolved every frame via focusCenter(), so while the Moon
-   * orbits mid-flight the transition keeps chasing its live position.
-   * The zoom clamps (min/maxDistance) animate with the camera (see body) so
-   * the fly-through is not cancelled by an instant range clamp.
+   * chains; a user grab cancels it (resetAnimId). The END target is
+   * re-resolved every frame via focusCenter(), so while the Moon orbits
+   * mid-flight the transition keeps chasing its live position.
    */
   private animateCameraTo(pose: CameraPose, durationMs = 900): void {
     if (this.resetAnimId != null) cancelAnimationFrame(this.resetAnimId);
@@ -2190,6 +2176,18 @@ export class EarthScene {
     }
   }
 
+  /** The planet whose moons are currently pickable — exactly the condition
+   *  syncFocusUI() uses to show the moon picker (the focused planet, or the
+   *  owner of the focused moon); null otherwise. Used to gate the moon
+   *  hit-proxies so a moon can't sit on top of its planet and steal the click
+   *  in the System overview. */
+  private moonOwnerForPick(): Focus | null {
+    const active = this.pendingFocus ?? this.focus;
+    if (isPlanetFocus(active)) return active;
+    if (isPlanetMoonFocus(active)) return MOON_OWNER[active];
+    return null;
+  }
+
   /** Keep the moving proxies in lock-step with their bodies (per frame). */
   private updateHitProxies(): void {
     for (const p of this.hitProxies) {
@@ -2200,7 +2198,10 @@ export class EarthScene {
         p.mesh.visible = true;
         p.mesh.position.copy(this.sunWorldPos);
       } else if (p.focus === 'moon') {
-        p.mesh.visible = this.moonMesh != null;
+        // Pickable only while viewing Earth or the Moon itself — in the System
+        // overview it would sit on top of Earth and steal the click.
+        const active = this.pendingFocus ?? this.focus;
+        p.mesh.visible = (active === 'earth' || active === 'moon') && this.moonMesh != null;
         if (this.moonMesh) p.mesh.position.copy(this.moonPosition);
       } else if (isPlanetFocus(p.focus)) {
         // Every planet is a click-to-zoom target at any zoom — free-roam
@@ -2221,7 +2222,10 @@ export class EarthScene {
         if (p.mesh.scale.x !== pick) p.mesh.scale.setScalar(pick);
         const mw = sys.moonWorld(p.focus, this._v);
         if (mw) p.mesh.position.copy(mw);
-        p.mesh.visible = true;
+        // Gate on focus relevance (matches the moon-picker UI) so a planet's
+        // moons are pick targets only while actually viewing that planet or one
+        // of its moons — not in the System overview.
+        p.mesh.visible = this.moonOwnerForPick() === owner;
       }
     }
   }
