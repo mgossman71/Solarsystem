@@ -7,18 +7,46 @@ export const CAMERA_FOV = 45; // vertical field of view (degrees)
 export const CAMERA_NEAR = 0.01;
 export const CAMERA_FAR = 25000; // must clear the far side of the star shell
   // (12000–13000, see sceneScale STAR_FIELD_RADIUS_*) as seen from the
-  // OUTERMOST camera — the top-down System zoom-out ceiling (~10000, see
-  // SYSTEM_VIEW_MAX_DISTANCE) puts the far shell edge at ~23000, so 25000
+  // OUTERMOST camera — the tilted System zoom-out ceiling (~8000, see
+  // SYSTEM_VIEW_MAX_FRAME) puts the far shell edge at ~21000, so 25000
   // leaves headroom.
 
 /** EARTH-RELATIVE starting offset (Earth orbits the Sun — add to its live
  *  position; the initial orbit angle places Earth opposite the initial Sun). */
 export const INITIAL_CAMERA_POSITION = new THREE.Vector3(0, 0.5, 3.2);
 
-/** SYSTEM (top-down overview) framing — the default starting view. */
+/** SYSTEM (overview) framing — the default starting view + what Reset returns to. */
 export const SYSTEM_VIEW_MIN_DISTANCE = 100; // well above the Sun's corona halo (~7.7)
 export const SYSTEM_VIEW_MAX_DISTANCE = 10000; // zoom-out ceiling (star shell 12000–13000 stays in view)
 export const SYSTEM_VIEW_MAX_FRAME = 8000; // cap on the fit distance (narrow aspects stay sane/zoomable)
+/** Elevation (deg) of the default System view above the orbital (XZ) plane.
+ *  45° = the classic 3/4 "hero" angle: up AND to the side, looking down at the
+ *  Sun (at the origin) — NOT a straight-down overhead. See `systemViewPose()`. */
+export const SYSTEM_VIEW_ELEVATION_DEG = 45;
+/** Azimuth (deg) the default System view sits to one side (90° => along +Z,
+ *  the same side the camera traditionally starts from). */
+export const SYSTEM_VIEW_AZIMUTH_DEG = 90;
+
+/**
+ * Unit direction from the Sun (origin) toward the camera for the default
+ * System overview — SYSTEM_VIEW_ELEVATION_DEG above the orbital (XZ) plane,
+ * offset to one side by SYSTEM_VIEW_AZIMUTH_DEG. This is the classic 3/4
+ * "hero" framing (up AND to the side), NOT a straight-down overhead.
+ *
+ * Single source of truth for BOTH the initial load (createCamera) and what
+ * Reset / the System button fly back to (systemViewPose), so the two can
+ * never disagree. Az 90° => the side offset lies along +Z, the same side the
+ * camera traditionally started from.
+ */
+export function systemViewDirection(): THREE.Vector3 {
+  const elev = THREE.MathUtils.degToRad(SYSTEM_VIEW_ELEVATION_DEG);
+  const az = THREE.MathUtils.degToRad(SYSTEM_VIEW_AZIMUTH_DEG);
+  return new THREE.Vector3(
+    Math.cos(elev) * Math.sin(az),
+    Math.sin(elev),
+    Math.cos(elev) * Math.cos(az),
+  );
+}
 
 /** Interaction "settling" window (ms) before auto-rotate / reframe resume. */
 export const INTERACTION_SETTLE_MS = 2000;

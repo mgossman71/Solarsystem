@@ -41,6 +41,7 @@ import {
   INTERACTION_SETTLE_MS,
   ORIENTATION_REFRAME_MS,
   SYSTEM_VIEW_MAX_FRAME,
+  systemViewDirection,
 } from '../config/camera';
 import { prefersReducedMotion } from '../config/mobile';
 import { sunVertexShader, sunFragmentShader } from '../sun/shaders/sun';
@@ -52,7 +53,7 @@ import { atmosphereVertexShader, atmosphereFragmentShader } from '../earth/shade
 import { moonVertexShader, moonFragmentShader } from '../moon/shaders/moon';
 import { PlanetSystem } from '../planets/PlanetSystem';
 import {
-  MOON_OWNER, PLANETS, PLANET_BY_ID,
+  MOON_OWNER, PLANETS,
   planetFrameRadius, planetMoonRadius, planetOrbitRadius, planetRadius,
   type MoonDef, type PlanetDef,
 } from '../planets/registry';
@@ -69,6 +70,26 @@ import {
 // ============================================================
 // EARTH SCENE CLASS
 // ============================================================
+
+/**
+ * Invisible enlarged raycast target — a real picking hit area that is
+ * comfortably tappable on touch even when the body is a sliver in the
+ * System view. Material is invisible (renderer skips it) but raycastable,
+ * so it never draws anything.
+ */
+interface HitProxy {
+  mesh: THREE.Mesh;
+  focus: Focus;
+  /** Owner planet's registry def (moon proxies only) — resolved once at
+   *  creation instead of a per-frame `moons.find()` scan. */
+  pdef?: PlanetDef;
+  /** The moon's registry def (moon proxies only) — resolved at creation. */
+  mdef?: MoonDef;
+  /** Cached pick radius for the ACTIVE scale mode (moon proxies only) —
+   *  invalidated in setScaleMode() alongside the roam colliders, so the
+   *  per-frame `scale.x !== pick` guard is free. */
+  pick?: number;
+}
 
 export class EarthScene {
   private container: HTMLElement;
@@ -204,13 +225,13 @@ export class EarthScene {
   private raycaster = new THREE.Raycaster();
   private _tap = { downX: 0, downY: 0, downT: 0 };
 
-  /**
-   * Invisible enlarged raycast targets — real picking hit areas that are
-   * comfortably tappable on touch even when the Moon is a sliver in the
-   * System view. Material is invisible (renderer skips it) but raycastable,
-   * so they never draw anything.
-   */
-  private hitProxies: { mesh: THREE.Mesh; focus: Focus }[] = [];
+  private hitProxies: HitProxy[] = [];
+  /** mesh → proxy: a raycast hit is reversed in O(1) instead of a linear
+   *  scan over the proxy array. */
+  private readonly hitProxyByMesh = new Map<THREE.Mesh, HitProxy>();
+  /** Reusable pick set — refilled in place on every tap so rapid selection
+   *  never allocates the filter + map arrays (GC churn). */
+  private readonly _pickSet: THREE.Mesh[] = [];
 
   // ------------------------------------------------------------
   // PLANET NAME LABELS (wide "System" overview)
@@ -251,14 +272,14 @@ export class EarthScene {
     this.applyURLParams();
     // The constructor framed the initial System view for the DEFAULT
     // ('explore') orbit span, but applyURLParams() may have switched to
-    // ?scale=real (Pluto 2300 → 3100), so re-fit the top-down camera now the
+    // ?scale=real (Pluto 2300 → 3100), so re-fit the tilted System camera now the
     // final scale mode is known. Instant snap — no user interaction has
     // happened yet, so no transition is needed (a live toggle later is
     // handled by setScaleMode).
     if (this.focus === 'system') {
-      this.camera.position.set(
-        0, this.systemFrameDistance(this.camera.fov, this.camera.aspect), 0,
-      );
+      this.camera.position
+        .copy(systemViewDirection())
+        .multiplyScalar(this.systemFrameDistance(this.camera.fov, this.camera.aspect));
       this.camera.lookAt(this._origin);
       this.roam.syncFromCamera();
     }
@@ -361,7 +382,7 @@ export class EarthScene {
       // this.focus here — that would bypass the guard, so getFocus() would
       // report a focus that was never committed and focusCenter() could resolve
       // it against a not-yet-built body. The default is already 'system'
-      // (top-down overview, always ready), so ?focus=system is a no-op.
+      // (the 45°-tilted overview, always ready), so ?focus=system is a no-op.
       if (focusParam !== 'system') this.pendingFocus = focusParam as Focus;
     }
     const sunParam = params.get('sun');
@@ -448,22 +469,25 @@ export class EarthScene {
 
   private createCamera(): THREE.PerspectiveCamera {
     // Far plane must clear the far side of the star shell (12000–13000, see
-    // sceneScale STAR_FIELD_RADIUS_*) from the OUTERMOST camera — the top-down
+    // sceneScale STAR_FIELD_RADIUS_*) from the OUTERMOST camera — the tilted
     // System overview can sit out to SYSTEM_VIEW_MAX_FRAME (~8000), so the far
     // shell edge is up to ~21000 from it; CAMERA_FAR (25000) clears that.
     const aspect = window.innerWidth / window.innerHeight;
     const camera = new THREE.PerspectiveCamera(CAMERA_FOV, aspect, CAMERA_NEAR, CAMERA_FAR);
-    // DEFAULT VIEW = the System: a straight-down overview centred on the Sun
-    // (at the origin) with every planet on its orbit below. Individual bodies
-    // are reached by fly-to (setFocus). Uses systemFrameDistance() with explicit
-    // fov/aspect because this.camera does not exist yet during construction.
-    camera.position.set(0, this.systemFrameDistance(CAMERA_FOV, aspect), 0);
+    // DEFAULT VIEW = the System: a 45°-elevated, side-offset (3/4) overview
+    // centred on the Sun (at the origin) with every planet on its orbit.
+    // Individual bodies are reached by fly-to (setFocus). Uses
+    // systemFrameDistance() with explicit fov/aspect because this.camera does
+    // not exist yet during construction.
+    camera.position
+      .copy(systemViewDirection())
+      .multiplyScalar(this.systemFrameDistance(CAMERA_FOV, aspect));
     return camera;
   }
 
   private createRoam(): RoamController {
     // The Sun is the fixed system centre — start looking at the origin
-    // (top-down overview), not at Earth (which orbits around it).
+    // (the 45°-tilted System overview), not at Earth (which orbits around it).
     this.camera.lookAt(this._origin);
     const roam = new RoamController(this.camera, this.renderer.domElement);
     roam.syncFromCamera();
@@ -743,7 +767,7 @@ export class EarthScene {
     this.starField.visible = this.state.stars;
 
     // Faint orbit guide rings (see OrbitRings.ts) — orientation for the
-    // top-down System overview. Rebuilt on scale-mode change (radii differ).
+    // tilted System overview. Rebuilt on scale-mode change (radii differ).
     // earthPos pre-orients the group so Earth's ring already passes through
     // Earth on frame 1; frame() re-applies the alignment every frame.
     this.orbitRings = createOrbitRings(this.scene, this.scaleMode, this.state.ringBrightness, this.earthPos);
@@ -1259,10 +1283,10 @@ export class EarthScene {
   }
 
   /**
-   * Smoothly return the camera to the initial view = the top-down System
-   * overview. Delegates to the shared focus transition (see setFocus) so
-   * Reset and the Explore selector can never fight each other. Cancels if
-   * the user grabs the camera mid-flight (resetAnimId).
+   * Smoothly return the camera to the initial view = the 45°-tilted,
+   * side-offset System overview. Delegates to the shared focus transition
+   * (see setFocus) so Reset and the Explore selector can never fight each
+   * other. Cancels if the user grabs the camera mid-flight (resetAnimId).
    */
   private resetView(): void {
     this.setFocus('system');
@@ -1576,10 +1600,15 @@ export class EarthScene {
     return (Math.max(span / vTan, span / hTan)) * margin;
   }
 
-  /** Straight-down distance at which the OUTERMOST orbit (current scale
-   *  mode) fits WITHOUT CROPPING in the given fov/aspect, capped so narrow
-   *  aspects stay sane and zoomable (see SYSTEM_VIEW_MAX_FRAME). Takes
-   *  explicit fov/aspect so it can run before this.camera exists (createCamera). */
+  /** Distance at which the OUTERMOST orbit (current scale mode) fits WITHOUT
+   *  CROPPING in the given fov/aspect, capped so narrow aspects stay sane and
+   *  zoomable (see SYSTEM_VIEW_MAX_FRAME). Takes explicit fov/aspect so it can
+   *  run before this.camera exists (createCamera).
+   *
+   *  Also the correct fit distance for the TILTED System view: with elevation
+   *  α the circle's vertical screen span shrinks to r·sinα (so the vertical
+   *  bound loosens to D ≥ r·1.1·sinα/(vTan−cosα) < r·1.1/vTan) and its side
+   *  span stays r — both remain satisfied at this (larger, safe) distance. */
   private systemFrameDistance(fovDeg: number, aspect: number): number {
     let outer = EARTH_ORBIT_RADIUS;
     for (const p of PLANETS) outer = Math.max(outer, planetOrbitRadius(p, this.scaleMode));
@@ -1589,14 +1618,25 @@ export class EarthScene {
     return Math.min(Math.max(outer / vTan, outer / hTan) * 1.1, SYSTEM_VIEW_MAX_FRAME);
   }
 
+  /**
+   * Default System-view pose — the 45°-elevated, side-offset (3/4) overview
+   * centred on the Sun (the origin). This is the single source of truth for
+   * what Reset / the System button fly back to and the re-fit after a
+   * scale-mode change, so they never disagree.
+   */
+  private systemViewPose(): CameraPose {
+    return {
+      position: systemViewDirection()
+        .multiplyScalar(this.systemFrameDistance(this.camera.fov, this.camera.aspect)),
+      target: this._origin.clone(),
+    };
+  }
+
   private computeFocusPose(focus: Focus): CameraPose {
     if (focus === 'system') {
-      // Straight-down overview of the whole system, centred on the Sun.
-      const dist = this.systemFrameDistance(this.camera.fov, this.camera.aspect);
-      return {
-        position: new THREE.Vector3(0, dist, 0),
-        target: this._origin.clone(),
-      };
+      // 45°-elevated, side-offset overview of the whole system, centred on
+      // the Sun (see systemViewPose — the shared default/Reset framing).
+      return this.systemViewPose();
     }
     if (focus === 'earth') {
       const dir = this.initialCameraPosition.clone().normalize();
@@ -1873,6 +1913,11 @@ export class EarthScene {
     for (const sys of this.planets.values()) sys.applyScaleMode(mode);
     // Radii changed — refresh the free-roam soft colliders to the new sizes.
     this.roam.colliders = this.buildRoamColliders();
+    // ...and the cached moon-proxy pick radii (same invalidation point — the
+    // per-frame `scale.x !== pick` guard then applies them for free).
+    for (const p of this.hitProxies) {
+      if (p.pdef && p.mdef) p.pick = this.planetMoonPickRadius(p.mdef, p.pdef, mode);
+    }
     // The orbit span changed — the faint guide rings must follow the new radii.
     this.rebuildOrbitRings();
     document.querySelectorAll('[data-scale]').forEach((el) => {
@@ -1961,10 +2006,12 @@ export class EarthScene {
       // meshes: at System distance the Moon is a sliver that is impossible to
       // finger-tap, so every body carries a comfortably oversized pick area
       // (material-invisible, raycast-visible).
-      const meshes = this.hitProxies.filter((p) => p.mesh.visible).map((p) => p.mesh);
+      const meshes = this._pickSet;
+      meshes.length = 0;
+      for (const p of this.hitProxies) if (p.mesh.visible) meshes.push(p.mesh);
       const hits = this.raycaster.intersectObjects(meshes, false);
       if (!hits.length) return;
-      const proxy = this.hitProxies.find((p) => p.mesh === hits[0].object);
+      const proxy = this.hitProxyByMesh.get(hits[0].object as THREE.Mesh);
       if (proxy) this.setFocus(proxy.focus);
     });
   }
@@ -1977,31 +2024,42 @@ export class EarthScene {
    */
   private createHitProxies(): void {
     const material = new THREE.MeshBasicMaterial({ visible: false });
-    const make = (radius: number, focus: Focus): { mesh: THREE.Mesh; focus: Focus } => {
+    // Build + register in one place: the hitProxies array (stable order) and
+    // the mesh→proxy map used to reverse a raycast hit in O(1).
+    const make = (
+      radius: number,
+      focus: Focus,
+      extra?: Pick<HitProxy, 'pdef' | 'mdef' | 'pick'>,
+    ): HitProxy => {
       const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 12, 8), material);
       mesh.visible = false; // updated by updateHitProxies(); raycast ignores visible
       this.scene.add(mesh);
-      return { mesh, focus };
+      const proxy: HitProxy = { mesh, focus, ...extra };
+      this.hitProxies.push(proxy);
+      this.hitProxyByMesh.set(mesh, proxy);
+      return proxy;
     };
     const earth = make(1.15, 'earth');
     earth.mesh.position.copy(this.earthPos);
     earth.mesh.visible = true;
-    this.hitProxies.push(earth);
     const sun = make(SUN_RADIUS * 1.2, 'sun');
     sun.mesh.visible = true; // position tracked by updateHitProxies()
-    this.hitProxies.push(sun);
-    const moon = make(0.5, 'moon');
-    this.hitProxies.push(moon);
+    make(0.5, 'moon');
     // Planets + their moons (world space, tracked per frame in updateHitProxies)
     for (const def of PLANETS) {
-      this.hitProxies.push(make(planetRadius(def) * 1.3, def.id));
+      make(planetRadius(def) * 1.3, def.id);
       for (const m of def.moons) {
-        // Unit sphere: the pick radius is applied as a per-frame scale in
+        // Unit sphere: the pick radius is applied as a scale in
         // updateHitProxies() so it stays scale-mode-aware (in Real scale the
         // true moon radii are 7–25× smaller than exploration-size pick spheres).
-        const proxy = make(1, m.id as Focus);
-        proxy.mesh.scale.setScalar(this.planetMoonPickRadius(m, def, this.scaleMode));
-        this.hitProxies.push(proxy);
+        // The defs and the current pick radius are resolved ONCE here at
+        // creation (invalidated in setScaleMode) — the per-frame path only
+        // copies, no `moons.find()` scan or radius recompute.
+        make(1, m.id as Focus, {
+          pdef: def,
+          mdef: m,
+          pick: this.planetMoonPickRadius(m, def, this.scaleMode),
+        });
       }
     }
   }
@@ -2020,7 +2078,7 @@ export class EarthScene {
   // PLANET NAME LABELS (wide "System" overview)
   // ------------------------------------------------------------
   /**
-   * Build one DOM pill per planet into `#planet-labels`. In the top-down
+   * Build one DOM pill per planet into `#planet-labels`. In the tilted
    * System view the true-scale planets are sub-pixel dots (see OrbitRings.ts)
    * — the labels are the only way to tell them apart, so they exist to point
    * at those dots. Each pill is itself clickable (data-focus → setFocus) and
@@ -2190,6 +2248,9 @@ export class EarthScene {
 
   /** Keep the moving proxies in lock-step with their bodies (per frame). */
   private updateHitProxies(): void {
+    // The moon gate is focus-derived and identical for every proxy this
+    // frame — resolve it once instead of per proxy.
+    const moonOwner = this.moonOwnerForPick();
     for (const p of this.hitProxies) {
       if (p.focus === 'earth') {
         p.mesh.visible = true;
@@ -2214,18 +2275,24 @@ export class EarthScene {
         const owner = MOON_OWNER[p.focus];
         const sys = this.planets.get(owner);
         if (!sys) { p.mesh.visible = false; continue; }
-        const pdef = PLANET_BY_ID[owner];
-        const mdef = pdef.moons.find((m) => m.id === p.focus);
-        // Scale-aware pick radius: the unit sphere is scaled to the active
-        // scale mode's tappable size (see planetMoonPickRadius).
-        const pick = mdef ? this.planetMoonPickRadius(mdef, pdef, this.scaleMode) : 0.8;
-        if (p.mesh.scale.x !== pick) p.mesh.scale.setScalar(pick);
-        const mw = sys.moonWorld(p.focus, this._v);
-        if (mw) p.mesh.position.copy(mw);
         // Gate on focus relevance (matches the moon-picker UI) so a planet's
         // moons are pick targets only while actually viewing that planet or one
         // of its moons — not in the System overview.
-        p.mesh.visible = this.moonOwnerForPick() === owner;
+        const relevant = moonOwner === owner;
+        // Track + size only while relevant (and on the frame a proxy BECOMES
+        // relevant, so position/scale are fresh before it turns visible) —
+        // hidden moons cost no world-position work and stay out of the
+        // raycast set.
+        if (relevant || !p.mesh.visible) {
+          // Scale-aware pick radius, cached at creation / on scale change
+          // (createHitProxies + setScaleMode; see planetMoonPickRadius): the
+          // unit sphere is scaled to the active mode's tappable size.
+          const pick = p.pick ?? 0.8;
+          if (p.mesh.scale.x !== pick) p.mesh.scale.setScalar(pick);
+          const mw = sys.moonWorld(p.focus, this._v);
+          if (mw) p.mesh.position.copy(mw);
+        }
+        p.mesh.visible = relevant;
       }
     }
   }

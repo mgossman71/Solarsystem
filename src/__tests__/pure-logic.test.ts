@@ -15,6 +15,11 @@ import {
   resolveProfile,
 } from '../core/Quality';
 import { EARTH_ORBIT_RADIUS, STAR_FIELD_RADIUS_MIN, wrapAzimuth } from '../config/sceneScale';
+import {
+  SYSTEM_VIEW_AZIMUTH_DEG,
+  SYSTEM_VIEW_ELEVATION_DEG,
+  systemViewDirection,
+} from '../config/camera';
 import { sunDirectionFromAzEl, sunDirectionToward } from '../lighting/SunLighting';
 import {
   KM_PER_UNIT,
@@ -52,6 +57,43 @@ describe('wrapAzimuth', () => {
   it('wraps by multiples of 360', () => {
     expect(wrapAzimuth(450)).toBe(wrapAzimuth(90));
     expect(wrapAzimuth(-450)).toBe(wrapAzimuth(-90));
+  });
+});
+
+// ------------------------------------------------------------
+// System view direction — the single source of truth for the
+// default load (createCamera) AND what Reset / the System button
+// fly back to (systemViewPose), so the two can never disagree.
+// ------------------------------------------------------------
+describe('systemViewDirection (default view + Reset framing)', () => {
+  const dir = systemViewDirection();
+  const elev = THREE.MathUtils.degToRad(SYSTEM_VIEW_ELEVATION_DEG);
+  const az = THREE.MathUtils.degToRad(SYSTEM_VIEW_AZIMUTH_DEG);
+  const expected = new THREE.Vector3(
+    Math.cos(elev) * Math.sin(az),
+    Math.sin(elev),
+    Math.cos(elev) * Math.cos(az),
+  );
+
+  it('is a unit vector at the expected 3/4 hero angle', () => {
+    expect(dir.length()).toBeCloseTo(1, 9);
+    expect(dir.x).toBeCloseTo(expected.x, 9);
+    expect(dir.y).toBeCloseTo(expected.y, 9);
+    expect(dir.z).toBeCloseTo(expected.z, 9);
+  });
+
+  it('sits at SYSTEM_VIEW_ELEVATION_DEG above the orbital plane', () => {
+    // Elevation of a unit direction = asin(y), measured from the XZ plane.
+    expect((Math.asin(dir.y) * 180) / Math.PI).toBeCloseTo(SYSTEM_VIEW_ELEVATION_DEG, 9);
+  });
+
+  it('is a SIDE-OFFSET tilt, not the old straight-down overhead (0,1,0)', () => {
+    // The regression the user hit: Reset must never fall back to top-down.
+    expect(dir.equals(new THREE.Vector3(0, 1, 0))).toBe(false);
+    // It must carry a real horizontal (side) component, not just height.
+    expect(Math.sqrt(dir.x * dir.x + dir.z * dir.z)).toBeGreaterThan(0.5);
+    // And it must sit ABOVE the plane (y > 0) looking down at the origin.
+    expect(dir.y).toBeGreaterThan(0);
   });
 });
 

@@ -1,6 +1,6 @@
 # Web-Earth
 
-An interactive, cinematic 3D **solar system** in the browser — starting from a top-down **System** overview of all **eight planets** (each on its real inclined orbital plane, with its major moons), zooming in to a textured **Earth** with a phase-correct **Moon** and a navigable, bloom-lit **Sun** — built with **Three.js**. The globe uses real NASA/satellite imagery (correctly georeferenced continents, coastlines and oceans — no procedural fakes), with a day/night terminator, city lights, ocean specular, an independent drifting cloud layer, and a sun-aware atmospheric limb glow. Mobile-first, with adaptive quality that renders at the right cost for each device.
+An interactive, cinematic 3D **solar system** in the browser — starting from a 45°-tilted, side-offset **System** overview of all **eight planets** (each on its real inclined orbital plane, with its major moons), zooming in to a textured **Earth** with a phase-correct **Moon** and a navigable, bloom-lit **Sun** — built with **Three.js**. The globe uses real NASA/satellite imagery (correctly georeferenced continents, coastlines and oceans — no procedural fakes), with a day/night terminator, city lights, ocean specular, an independent drifting cloud layer, and a sun-aware atmospheric limb glow. Mobile-first, with adaptive quality that renders at the right cost for each device.
 
 ## Features
 
@@ -9,7 +9,7 @@ An interactive, cinematic 3D **solar system** in the browser — starting from a
 - **Independent Moon** — real Moon texture, phase driven by the Sun, three orbit modes (*Paused / Visualized / Real Time*).
 - **Navigable Sun** — focus, orbit, and look at a real 4k solar texture with bloom + corona; presets and an auto-orbiting Sun.
 - **Eight planets + moons** — Mercury through Pluto, each on its **real inclined orbital plane** (inclination + ascending node), with its major moons (Io, Europa, Ganymede, Callisto; Titan, Iapetus; Triton; Charon; …), Saturn's rings, and lazily-loaded textures.
-- **System overview (the default view)** — a straight-down, Sun-centred framing of the whole system with faint **orbit guide rings** (one per planet, in its own inclined plane) and optional **planet name labels** that are themselves clickable and fly you to that planet.
+- **System overview (the default view + what Reset returns to)** — a 45°-elevated, side-offset (3/4), Sun-centred framing of the whole system with faint **orbit guide rings** (one per planet, in its own inclined plane) and optional **planet name labels** that are themselves clickable and fly you to that planet.
 - **Selection & focus** — click/tap any body, its label, or the **System · Sun · planets** buttons to focus; *Real Scale* shows true relative sizes/distances.
 - **Adaptive quality** — `high / balanced / performance` tiers (pixel-ratio cap, star count, tessellation, bloom, MSAA, texture set), auto-detected from measurable device signals (not user-agent sniffing) with a runtime FPS guard that steps down when a device can't keep up.
 - **Mobile-first UI** — one-finger look / pinch-zoom / two-finger fly, a draggable bottom "Controls" sheet, a touch sun pad (azimuth/elevation), safe-area insets, and respect for `prefers-reduced-motion`.

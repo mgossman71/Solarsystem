@@ -281,47 +281,70 @@ export class RoamController extends THREE.EventDispatcher<RoamControllerEvents> 
       this.touchMove.x = this.touchMove.y = 0;
       return;
     }
-    if (focusPoint) this.focusPoint.copy(focusPoint);
-    const scale = this.scaleFactor();
+    // IDLE FAST PATH — with no queued input nothing can move: skip the whole
+    // input pipeline (scaleFactor's distanceTo sqrt, getWorldDirection's
+    // matrix decompose + normalize, the six key checks and the Euler →
+    // quaternion commit). The common case is a scene left auto-rotating with
+    // zero input, and this also stops an idle frame from ever rewriting the
+    // camera pose. The accumulators are zero by definition here, so the
+    // end-of-frame reset is a no-op and is skipped with the rest.
+    // Safety (5-6) is deliberately NOT gated: a body's collider orbits
+    // independently of input and can drift toward a parked camera, so the
+    // sweep must still run every frame.
+    const dirty =
+      this.look.x !== 0 || this.look.y !== 0 ||
+      this.dolly !== 0 ||
+      this.touchMove.x !== 0 || this.touchMove.y !== 0 ||
+      this.keys.size > 0;
+    if (dirty) {
+      if (focusPoint) this.focusPoint.copy(focusPoint);
+      const scale = this.scaleFactor();
 
-    // 1) LOOK — drag + horizontal wheel, yaw about world-up.
-    const hasLook = this.look.x !== 0 || this.look.y !== 0;
-    if (hasLook) {
-      this.yaw -= this.look.x * ROAM.lookSpeed;
-      // Clamp the STORED pitch (not just a local copy in applyOrientation) so it
-      // can't run past the pole and leave a dead-zone of unresponsive drag.
-      this.pitch = THREE.MathUtils.clamp(
-        this.pitch - this.look.y * ROAM.lookSpeed, -ROAM.maxPitch, ROAM.maxPitch);
+      // 1) LOOK — drag + horizontal wheel, yaw about world-up.
+      const hasLook = this.look.x !== 0 || this.look.y !== 0;
+      if (hasLook) {
+        this.yaw -= this.look.x * ROAM.lookSpeed;
+        // Clamp the STORED pitch (not just a local copy in applyOrientation) so
+        // it can't run past the pole and leave a dead-zone of unresponsive drag.
+        this.pitch = THREE.MathUtils.clamp(
+          this.pitch - this.look.y * ROAM.lookSpeed, -ROAM.maxPitch, ROAM.maxPitch);
+      }
+
+      // 2) MOVE — WASD/QE (view-relative) + two-finger touch drag.
+      this.camera.getWorldDirection(this._fwd);
+      this._right.crossVectors(this._fwd, this._up).normalize();
+      this._move.set(0, 0, 0);
+      if (this.keys.has('w')) this._move.addScaledVector(this._fwd, 1);
+      if (this.keys.has('s')) this._move.addScaledVector(this._fwd, -1);
+      if (this.keys.has('d')) this._move.addScaledVector(this._right, 1);
+      if (this.keys.has('a')) this._move.addScaledVector(this._right, -1);
+      if (this.keys.has('e')) this._move.addScaledVector(this._up, 1);
+      if (this.keys.has('q')) this._move.addScaledVector(this._up, -1);
+      if (this.touchMove.x !== 0) this._move.addScaledVector(this._right, this.touchMove.x * ROAM.touchMoveSpeed);
+      if (this.touchMove.y !== 0) this._move.addScaledVector(this._up, -this.touchMove.y * ROAM.touchMoveSpeed);
+      if (this._move.lengthSq() > 0) {
+        const boost = this.shiftHeld ? ROAM.boost : 1;
+        this.camera.position.addScaledVector(this._move.normalize(), ROAM.moveSpeed * scale * boost * dt);
+      }
+
+      // 3) DOLLY — vertical wheel / pinch (zoom along the view).
+      if (this.dolly !== 0) {
+        const dir = this.dolly > 0 ? -1 : 1; // scroll-down / pinch-in = zoom out
+        const amount = Math.abs(this.dolly) * ROAM.zoomSpeed * scale;
+        this.camera.position.addScaledVector(this._fwd, dir * amount);
+      }
+
+      // 4) COMMIT orientation — only when look input changed it, so a frame
+      //    without look input (e.g. right after a tilted System fly-to)
+      //    can't rewrite the pose past maxPitch and tilt it away from the
+      //    intended framing.
+      if (hasLook) this.applyOrientation();
+
+      // 7) RESET accumulators (only meaningful on an input frame).
+      this.look.x = this.look.y = 0;
+      this.dolly = 0;
+      this.touchMove.x = this.touchMove.y = 0;
     }
-
-    // 2) MOVE — WASD/QE (view-relative) + two-finger touch drag.
-    this.camera.getWorldDirection(this._fwd);
-    this._right.crossVectors(this._fwd, this._up).normalize();
-    this._move.set(0, 0, 0);
-    if (this.keys.has('w')) this._move.addScaledVector(this._fwd, 1);
-    if (this.keys.has('s')) this._move.addScaledVector(this._fwd, -1);
-    if (this.keys.has('d')) this._move.addScaledVector(this._right, 1);
-    if (this.keys.has('a')) this._move.addScaledVector(this._right, -1);
-    if (this.keys.has('e')) this._move.addScaledVector(this._up, 1);
-    if (this.keys.has('q')) this._move.addScaledVector(this._up, -1);
-    if (this.touchMove.x !== 0) this._move.addScaledVector(this._right, this.touchMove.x * ROAM.touchMoveSpeed);
-    if (this.touchMove.y !== 0) this._move.addScaledVector(this._up, -this.touchMove.y * ROAM.touchMoveSpeed);
-    if (this._move.lengthSq() > 0) {
-      const boost = this.shiftHeld ? ROAM.boost : 1;
-      this.camera.position.addScaledVector(this._move.normalize(), ROAM.moveSpeed * scale * boost * dt);
-    }
-
-    // 3) DOLLY — vertical wheel / pinch (zoom along the view).
-    if (this.dolly !== 0) {
-      const dir = this.dolly > 0 ? -1 : 1; // scroll-down / pinch-in = zoom out
-      const amount = Math.abs(this.dolly) * ROAM.zoomSpeed * scale;
-      this.camera.position.addScaledVector(this._fwd, dir * amount);
-    }
-
-    // 4) COMMIT orientation — only when look input changed it, so an idle frame
-    //    (e.g. right after a top-down System fly-to) can't rewrite the pose past
-    //    maxPitch and tilt it away from a true straight-down view.
-    if (hasLook) this.applyOrientation();
 
     // 5) SAFETY — soft collider: stay just outside every body.
     for (const c of this.colliders) {
@@ -340,11 +363,6 @@ export class RoamController extends THREE.EventDispatcher<RoamControllerEvents> 
     // 6) SAFETY — hard range cap: stay inside the star shell.
     const range = this.camera.position.length();
     if (range > ROAM.maxRange) this.camera.position.multiplyScalar(ROAM.maxRange / range);
-
-    // 7) RESET accumulators.
-    this.look.x = this.look.y = 0;
-    this.dolly = 0;
-    this.touchMove.x = this.touchMove.y = 0;
   }
 
   // --------------------------------------------------------------
