@@ -51,6 +51,9 @@ export class RoamController extends THREE.EventDispatcher<RoamControllerEvents> 
   private readonly touchMove = { x: 0, y: 0 };  // two-finger drag, px
   private dolly = 0;                            // vertical wheel + pinch, px
   private readonly keys = new Set<string>();
+  /** Whether Shift is held (boost). Tracked separately: the `Shift` key is not
+   *  in MOVE_KEYS, so `keys.has('shift')` was always false and boost was dead. */
+  private shiftHeld = false;
 
   // Multi-touch tracking.
   private readonly pointers = new Map<number, PointerEntry>();
@@ -81,6 +84,10 @@ export class RoamController extends THREE.EventDispatcher<RoamControllerEvents> 
   private readonly hKeyDown = (e: KeyboardEvent): void => this.onKeyDown(e);
   private readonly hKeyUp = (e: KeyboardEvent): void => this.onKeyUp(e);
   private readonly hContext = (e: Event): void => e.preventDefault();
+  private readonly hBlur = (): void => this.clearTransientInput();
+  private readonly hVisibility = (): void => {
+    if (document.visibilityState === 'hidden') this.clearTransientInput();
+  };
 
   constructor(camera: THREE.PerspectiveCamera, dom: HTMLElement, colliders: RoamCollider[] = []) {
     super();
@@ -96,6 +103,8 @@ export class RoamController extends THREE.EventDispatcher<RoamControllerEvents> 
     window.addEventListener('pointercancel', this.hPointerUp);
     window.addEventListener('keydown', this.hKeyDown);
     window.addEventListener('keyup', this.hKeyUp);
+    window.addEventListener('blur', this.hBlur);
+    document.addEventListener('visibilitychange', this.hVisibility);
     dom.addEventListener('contextmenu', this.hContext);
   }
 
@@ -148,17 +157,46 @@ export class RoamController extends THREE.EventDispatcher<RoamControllerEvents> 
       const [rest] = this.pointers.values();
       this.centroid.x = rest.x;
       this.centroid.y = rest.y;
+    } else if (this.pointers.size === 2) {
+      // 3→2 transition: re-seed pinch + centroid from the two live fingers so
+      // the next pointermove doesn't delta against a long-stale centroid.
+      this.resetPinch();
     }
     this.markInput();
   }
 
   private onKeyDown(e: KeyboardEvent): void {
+    // Ignore browser/IME shortcut combos (Cmd/Ctrl/Alt): they can claim the key
+    // and suppress its keyup, which would leave the camera moving with no input.
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
     const k = e.key.toLowerCase();
-    if (MOVE_KEYS.has(k)) { this.keys.add(k); this.markInput(); }
+    if (k === 'shift') { this.shiftHeld = true; return; }
+    if (MOVE_KEYS.has(k)) {
+      this.keys.add(k);
+      this.shiftHeld = e.shiftKey; // reflect a Shift already held before this key
+      this.markInput();
+    }
   }
 
   private onKeyUp(e: KeyboardEvent): void {
-    this.keys.delete(e.key.toLowerCase());
+    const k = e.key.toLowerCase();
+    if (k === 'shift') { this.shiftHeld = false; return; }
+    this.keys.delete(k); // always clean up — never gate on modifiers
+    if (MOVE_KEYS.has(k)) this.shiftHeld = e.shiftKey;
+  }
+
+  /** Drop transient input (stuck keys / in-flight pointers / queued deltas).
+   *  Called on window blur and when the tab is hidden, where a keyup may never
+   *  arrive — without this a held key stays in `keys` forever, so update() can
+   *  never settle to 'end' and the dim/auto-rotate release is stuck off. */
+  private clearTransientInput(): void {
+    this.keys.clear();
+    this.shiftHeld = false;
+    this.pointers.clear();
+    this.pinchDist = 0;
+    this.look.x = this.look.y = 0;
+    this.dolly = 0;
+    this.touchMove.x = this.touchMove.y = 0;
   }
 
   private resetPinch(): void {
@@ -235,14 +273,25 @@ export class RoamController extends THREE.EventDispatcher<RoamControllerEvents> 
         this.dispatchEvent({ type: 'end' });
       }
     }
-    if (this.flying) return; // a fly-to transition owns the camera right now
+    if (this.flying) {
+      // A fly-to owns the camera: drop input that accumulated DURING the
+      // transition so it can't replay as a one-frame burst the instant it ends.
+      this.look.x = this.look.y = 0;
+      this.dolly = 0;
+      this.touchMove.x = this.touchMove.y = 0;
+      return;
+    }
     if (focusPoint) this.focusPoint.copy(focusPoint);
     const scale = this.scaleFactor();
 
     // 1) LOOK — drag + horizontal wheel, yaw about world-up.
-    if (this.look.x !== 0 || this.look.y !== 0) {
+    const hasLook = this.look.x !== 0 || this.look.y !== 0;
+    if (hasLook) {
       this.yaw -= this.look.x * ROAM.lookSpeed;
-      this.pitch -= this.look.y * ROAM.lookSpeed;
+      // Clamp the STORED pitch (not just a local copy in applyOrientation) so it
+      // can't run past the pole and leave a dead-zone of unresponsive drag.
+      this.pitch = THREE.MathUtils.clamp(
+        this.pitch - this.look.y * ROAM.lookSpeed, -ROAM.maxPitch, ROAM.maxPitch);
     }
 
     // 2) MOVE — WASD/QE (view-relative) + two-finger touch drag.
@@ -258,7 +307,7 @@ export class RoamController extends THREE.EventDispatcher<RoamControllerEvents> 
     if (this.touchMove.x !== 0) this._move.addScaledVector(this._right, this.touchMove.x * ROAM.touchMoveSpeed);
     if (this.touchMove.y !== 0) this._move.addScaledVector(this._up, -this.touchMove.y * ROAM.touchMoveSpeed);
     if (this._move.lengthSq() > 0) {
-      const boost = this.keys.has('shift') ? ROAM.boost : 1;
+      const boost = this.shiftHeld ? ROAM.boost : 1;
       this.camera.position.addScaledVector(this._move.normalize(), ROAM.moveSpeed * scale * boost * dt);
     }
 
@@ -269,8 +318,10 @@ export class RoamController extends THREE.EventDispatcher<RoamControllerEvents> 
       this.camera.position.addScaledVector(this._fwd, dir * amount);
     }
 
-    // 4) COMMIT orientation.
-    this.applyOrientation();
+    // 4) COMMIT orientation — only when look input changed it, so an idle frame
+    //    (e.g. right after a top-down System fly-to) can't rewrite the pose past
+    //    maxPitch and tilt it away from a true straight-down view.
+    if (hasLook) this.applyOrientation();
 
     // 5) SAFETY — soft collider: stay just outside every body.
     for (const c of this.colliders) {
@@ -310,8 +361,11 @@ export class RoamController extends THREE.EventDispatcher<RoamControllerEvents> 
     window.removeEventListener('pointercancel', this.hPointerUp);
     window.removeEventListener('keydown', this.hKeyDown);
     window.removeEventListener('keyup', this.hKeyUp);
+    window.removeEventListener('blur', this.hBlur);
+    document.removeEventListener('visibilitychange', this.hVisibility);
     dom.removeEventListener('contextmenu', this.hContext);
     this.pointers.clear();
     this.keys.clear();
+    this.shiftHeld = false;
   }
 }

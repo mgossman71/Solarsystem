@@ -49,6 +49,4 @@ export type ScaleMode = 'explore' | 'real';
 export interface CameraPose {
   position: THREE.Vector3;
   target: THREE.Vector3;
-  minDistance: number;
-  maxDistance: number;
 }
